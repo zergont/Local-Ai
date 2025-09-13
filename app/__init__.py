@@ -1,1 +1,4 @@
-"""App package for local_responses_api skeleton."""
+"""Local Responses API package.
+
+Entry: Local_Ai:app -> app.api.create_app()
+"""

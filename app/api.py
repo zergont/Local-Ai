@@ -18,6 +18,7 @@ Sanity tests:
 """
 from __future__ import annotations
 
+import uuid as _uuid
 import orjson
 from typing import Any, List
 from pathlib import Path
@@ -72,6 +73,8 @@ def create_app() -> FastAPI:
 
     @app.post("/responses", response_model=ResponsePayload)
     async def post_responses(req: ResponseRequest) -> ResponsePayload:
+        rid = str(_uuid.uuid4())
+        resp_id: str | None = None
         try:
             _user_msg_id, resp_id, output_text, usage, actual_thread_id = await service.respond(
                 thread_id=req.thread_id,
@@ -87,8 +90,15 @@ def create_app() -> FastAPI:
                 usage=usage,
             )
         except Exception as e:  # noqa: BLE001
-            log_error("error_post_responses", error=str(e))
-            raise HTTPException(status_code=500, detail="internal error")
+            # Log error with trace_id and optional response_id
+            if resp_id:
+                log_error("error_post_responses", error=str(e), trace_id=rid, response_id=resp_id)
+            else:
+                log_error("error_post_responses", error=str(e), trace_id=rid)
+            detail: dict[str, Any] = {"error": "internal error", "trace_id": rid}
+            if resp_id:
+                detail["response_id"] = resp_id
+            raise HTTPException(status_code=500, detail=detail)
 
     @app.get("/responses/{response_id}")
     async def get_response(response_id: str) -> Any:
@@ -120,9 +130,9 @@ def create_app() -> FastAPI:
     # Minimal static files by id (dev helper): maps /file/{id} to ./files/{id}
     @app.get("/file/{file_id}")
     async def get_file(file_id: str) -> FileResponse:
-        base = Path("files")
+        base = Path("files").resolve()
         path = (base / file_id).resolve()
-        if not path.exists() or base.resolve() not in path.parents and base.resolve() != path.parent:
+        if not path.is_file() or base not in path.parents:
             raise HTTPException(status_code=404, detail="not found")
         return FileResponse(path)
 
