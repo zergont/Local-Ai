@@ -51,9 +51,11 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="app\" />
+    <Folder Include="files\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include=".env.example" />
+    <Content Include="files\.gitkeep" />
     <Content Include="README.md" />
     <Content Include="requirements.txt" />
     <Content Include="schema.sql" />

@@ -58,7 +58,14 @@ def create_app() -> FastAPI:
             schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
             schema_sql = schema_path.read_text(encoding="utf-8")
             await db.executescript(schema_sql)
-            log_info("startup", db=db.path, llm_base=settings.llm_base_url, schema=str(schema_path))
+            log_info(
+                "startup",
+                db=db.path,
+                llm_base=settings.llm_base_url,
+                schema=str(schema_path),
+                chat_model=settings.llm_model,
+                vision_model=settings.vision_model,
+            )
         except Exception as e:  # noqa: BLE001
             log_error("startup_schema_error", error=str(e))
             raise
