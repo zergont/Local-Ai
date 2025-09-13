@@ -338,6 +338,20 @@ ENV/
 .idea/
 *.swp
 
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj*
+*.csproj*
+*.vbproj*
+*.pyproj
+*.vc.db
+*.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
 # OS files
 .DS_Store
 Thumbs.db

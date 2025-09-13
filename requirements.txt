@@ -5,3 +5,4 @@ aiosqlite==0.20.*
 pydantic-settings==2.6.*
 orjson==3.*
 python-dotenv==1.0.*
+python-multipart==0.0.*

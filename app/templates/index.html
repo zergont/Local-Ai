@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Local AI — Chat</title>
+  <style>
+    :root{--bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#a8b3cf;--acc:#4da3ff;}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Arial}
+    header{padding:16px 20px;border-bottom:1px solid #232836;background:#0f1115;position:sticky;top:0}
+    .wrap{max-width:980px;margin:0 auto;padding:20px}
+    .row{display:flex;gap:12px;align-items:center}
+    .card{background:var(--card);border:1px solid #232836;border-radius:14px;padding:14px}
+    .msgs{display:flex;flex-direction:column;gap:12px}
+    .msg{padding:12px;border-radius:12px}
+    .u{background:#1e2430}
+    .a{background:#131722}
+    .meta{color:var(--muted);font-size:12px;margin-top:6px}
+    button,input,textarea{font:inherit}
+    textarea{width:100%;min-height:80px;resize:vertical;background:#0f1115;color:var(--text);border:1px solid #232836;border-radius:12px;padding:10px}
+    .controls{display:flex;gap:8px;align-items:center;margin-top:8px}
+    .controls button{background:var(--acc);border:none;color:#081120;padding:10px 14px;border-radius:10px;cursor:pointer}
+    .controls input[type=file]{display:none}
+    .pill{color:var(--muted);font-size:12px}
+    a{color:#8ecbff}
+    .kbd{font:12px/1 monospace;background:#0b0d12;border:1px solid #232836;border-radius:6px;padding:2px 6px}
+  </style>
+</head>
+<body>
+<header class="wrap">
+  <div class="row">
+    <strong>Local AI — Chat</strong>
+    <span class="pill" id="thread-pill"></span>
+    <span class="pill">Ctrl/⌘+Enter — отправить</span>
+  </div>
+</header>
+<main class="wrap">
+  <div id="messages" class="msgs"></div>
+
+  <div class="card" style="margin-top:16px">
+    <textarea id="input" placeholder="Напишите сообщение..."></textarea>
+    <div class="controls">
+      <label for="file"><span class="kbd">+</span> Вложение</label>
+      <input id="file" type="file" />
+      <button id="send">Отправить</button>
+      <button id="new">Новый диалог</button>
+      <span id="status" class="pill"></span>
+    </div>
+  </div>
+</main>
+
+<script>
+const api = (path) => path.startsWith('http') ? path : (location.origin + path);
+let threadId = localStorage.getItem('thread_id') || null;
+
+const elMsgs = document.getElementById('messages');
+const elInput = document.getElementById('input');
+const elSend = document.getElementById('send');
+const elFile = document.getElementById('file');
+const elNew = document.getElementById('new');
+const elStatus = document.getElementById('status');
+const elPill = document.getElementById('thread-pill');
+
+function setThread(id){
+  threadId = id;
+  if(id){ localStorage.setItem('thread_id', id); elPill.textContent = 'thread: ' + id.slice(0,8) + '…'; }
+  else { localStorage.removeItem('thread_id'); elPill.textContent = 'новый тред'; }
+}
+setThread(threadId);
+
+function addMsg(role, text){
+  const div = document.createElement('div');
+  div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
+  div.innerHTML = text.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  elMsgs.appendChild(div);
+  elMsgs.scrollTop = elMsgs.scrollHeight;
+}
+
+async function uploadFile(file){
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch(api('/ui/upload'), { method:'POST', body: fd });
+  if(!res.ok){ throw new Error('upload failed'); }
+  const j = await res.json();
+  return j.url; // /file/<name>
+}
+
+elFile.addEventListener('change', async (e)=>{
+  const f = e.target.files?.[0];
+  if(!f) return;
+  elStatus.textContent = 'Загрузка файла…';
+  try{
+    const url = await uploadFile(f);
+    // подставляем ссылку в поле ввода
+    elInput.value = (elInput.value ? elInput.value + '\n' : '') + url;
+    elStatus.textContent = 'Файл готов: ' + url;
+  }catch(err){
+    elStatus.textContent = 'Ошибка загрузки';
+  }finally{
+    elFile.value = '';
+  }
+});
+
+async function send(){
+  const text = elInput.value.trim();
+  if(!text) return;
+  addMsg('user', text);
+  elInput.value = '';
+  elStatus.textContent = 'Думаю…';
+
+  const payload = { input_text: text, store: true };
+  if(threadId) payload.thread_id = threadId;
+
+  try{
+    const res = await fetch(api('/responses'), {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const j = await res.json();
+    if(!res.ok){ throw new Error((j && j.detail) || 'error'); }
+
+    if(!threadId && j.thread_id) setThread(j.thread_id);
+    addMsg('assistant', j.output_text || '(пусто)');
+    elStatus.textContent = j.usage ? `tokens≈ ${j.usage.total_tokens}` : '';
+  }catch(err){
+    addMsg('assistant', '⚠️ Ошибка: ' + err.message);
+    elStatus.textContent = 'Ошибка';
+  }
+}
+
+elSend.addEventListener('click', send);
+elInput.addEventListener('keydown', (e)=>{
+  if((e.metaKey || e.ctrlKey) && e.key === 'Enter'){ send(); }
+});
+elNew.addEventListener('click', ()=>{
+  setThread(null);
+  addMsg('assistant', '— Новый диалог —');
+});
+</script>
+</body>
+</html>

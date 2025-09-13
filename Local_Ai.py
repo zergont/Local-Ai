@@ -19,6 +19,10 @@ Curl sanity test:
 from __future__ import annotations
 
 from app.api import app
+from app.ui import router as ui_router
+
+# include UI router for local chat interface
+app.include_router(ui_router)
 
 __all__ = ["app"]
 

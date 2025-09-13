@@ -35,6 +35,7 @@
     <Compile Include="app\settings.py" />
     <Compile Include="app\summarizer.py" />
     <Compile Include="app\tooling.py" />
+    <Compile Include="app\ui.py" />
     <Compile Include="app\__init__.py" />
     <Compile Include="Local_Ai.py" />
   </ItemGroup>
@@ -51,10 +52,12 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="app\" />
+    <Folder Include="app\templates\" />
     <Folder Include="files\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include=".env.example" />
+    <Content Include="app\templates\index.html" />
     <Content Include="files\.gitkeep" />
     <Content Include="README.md" />
     <Content Include="requirements.txt" />

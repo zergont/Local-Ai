@@ -7,6 +7,7 @@ Endpoints:
 - GET /threads/{thread_id}/summary
 - POST /threads/{thread_id}/summarize
 - GET /file/{id} -> serve local static file by id (simple dev helper)
+- UI: GET / (HTML chat), POST /ui/upload (file upload)
 
 Run:
     uvicorn Local_Ai:app --host 0.0.0.0 --port 8080
@@ -33,6 +34,7 @@ from .logging_utils import log_error, log_info
 from .models import ResponsePayload, ResponseRequest
 from .service import LocalResponsesService
 from . import summarizer
+from .ui import router as ui_router
 
 
 class ORJSONResponse2(ORJSONResponse):
@@ -45,6 +47,8 @@ class ORJSONResponse2(ORJSONResponse):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Local Responses API", default_response_class=ORJSONResponse2)
+
+    app.include_router(ui_router)
 
     db = Database(settings.database_path)
     llm = LLMClient()
