@@ -21,7 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import aiosqlite
 
-from .logging_utils import log_info
+from .logging_utils import log_error, log_info
 
 
 PRAGMAS = [
@@ -56,29 +56,55 @@ class Database:
             await self._db.close()
             self._db = None
 
+    # ---- low-level helpers with locked-retry on 'database is locked' ----
+
+    async def _execute_with_retry(self, func, *args) -> Any:
+        assert self._db is not None
+        delays = [0.01, 0.02, 0.04, 0.08]
+        last_err: Optional[Exception] = None
+        for i, d in enumerate(delays, start=1):
+            try:
+                return await func(*args)
+            except aiosqlite.OperationalError as e:  # type: ignore[attr-defined]
+                msg = str(e)
+                if "database is locked" in msg:
+                    log_error("sqlite_locked", attempt=i, delay_s=d)
+                    await asyncio.sleep(d)
+                    continue
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                break
+        if last_err:
+            raise last_err
+
     async def executescript(self, script: str) -> None:
         assert self._db is not None, "Database not connected"
-        await self._db.executescript(script)
+        await self._execute_with_retry(self._db.executescript, script)
         await self._db.commit()
 
     async def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
         assert self._db is not None, "Database not connected"
-        await self._db.execute(sql, params or [])
+        await self._execute_with_retry(self._db.execute, sql, params or [])
         await self._db.commit()
 
     async def fetch_one(self, sql: str, params: Sequence[Any] | None = None) -> Optional[Dict[str, Any]]:
         assert self._db is not None, "Database not connected"
         self._db.row_factory = aiosqlite.Row
-        async with self._db.execute(sql, params or []) as cursor:
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        async def _inner() -> Any:
+            async with self._db.execute(sql, params or []) as cursor:
+                return await cursor.fetchone()
+        row = await self._execute_with_retry(_inner)
+        return dict(row) if row else None
 
     async def fetch_all(self, sql: str, params: Sequence[Any] | None = None) -> List[Dict[str, Any]]:
         assert self._db is not None, "Database not connected"
         self._db.row_factory = aiosqlite.Row
-        async with self._db.execute(sql, params or []) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+        async def _inner() -> Any:
+            async with self._db.execute(sql, params or []) as cursor:
+                return await cursor.fetchall()
+        rows = await self._execute_with_retry(_inner)
+        return [dict(r) for r in rows]
 
     # ----------------- CRUD helpers -----------------
 
@@ -86,7 +112,8 @@ class Database:
         """Create a new thread and return its id."""
         thread_id = str(uuid.uuid4())
         await self.execute(
-            "INSERT INTO threads(id, created_at) VALUES (?, ?)", [thread_id, time.time()]
+            "INSERT INTO threads(id, created_at) VALUES (?, ?)",
+            [thread_id, time.time()],
         )
         return thread_id
 

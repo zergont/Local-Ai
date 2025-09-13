@@ -5,6 +5,8 @@ Endpoints:
 - GET /responses/{response_id}
 - GET /threads/{thread_id}/messages?limit=50
 - GET /threads/{thread_id}/summary
+- POST /threads/{thread_id}/summarize
+- GET /file/{id} -> serve local static file by id (simple dev helper)
 
 Run:
     uvicorn Local_Ai:app --host 0.0.0.0 --port 8080
@@ -21,7 +23,7 @@ from typing import Any, List
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, FileResponse
 
 from .config import get_settings
 from .db import Database
@@ -29,6 +31,7 @@ from .llm_client import LLMClient
 from .logging_utils import log_error, log_info
 from .models import ResponsePayload, ResponseRequest
 from .service import LocalResponsesService
+from . import summarizer
 
 
 class ORJSONResponse2(ORJSONResponse):
@@ -58,6 +61,8 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             log_error("startup_schema_error", error=str(e))
             raise
+        # Init summarizer module
+        summarizer.init(db, llm)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -102,6 +107,24 @@ def create_app() -> FastAPI:
     async def get_thread_summary(thread_id: str) -> Any:
         summary = await db.get_summary(thread_id)
         return {"thread_id": thread_id, "summary": summary or ""}
+
+    @app.post("/threads/{thread_id}/summarize")
+    async def post_thread_summarize(thread_id: str) -> Any:
+        try:
+            text = await summarizer.summarize(thread_id)
+            return {"thread_id": thread_id, "summary": text}
+        except Exception as e:  # noqa: BLE001
+            log_error("error_manual_summarize", thread_id=thread_id, error=str(e))
+            raise HTTPException(status_code=500, detail="internal error")
+
+    # Minimal static files by id (dev helper): maps /file/{id} to ./files/{id}
+    @app.get("/file/{file_id}")
+    async def get_file(file_id: str) -> FileResponse:
+        base = Path("files")
+        path = (base / file_id).resolve()
+        if not path.exists() or base.resolve() not in path.parents and base.resolve() != path.parent:
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(path)
 
     return app
 

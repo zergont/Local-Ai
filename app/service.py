@@ -1,13 +1,16 @@
 """Core service orchestration for Local Responses API."""
 from __future__ import annotations
 
+import json
+import time
 import uuid
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .config import get_settings
 from .db import Database
 from .llm_client import LLMClient
-from .logging_utils import log_info
+from .logging_utils import log_info, log_error
+from .tooling import list_tools, tools_openai_format
 
 
 SYSTEM_PROMPT = "You are a helpful assistant. Be concise."
@@ -18,18 +21,56 @@ class LocalResponsesService:
         self._db = db
         self._llm = llm
         self._s = get_settings()
+        # Build tool registry map
+        self._tools = {t.name: t for t in list_tools()}
 
     async def build_context(self, thread_id: str) -> List[Dict[str, str]]:
-        # Compose context from summary + recent messages
+        # Always: SYSTEM + summary + last K messages only
         chat: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         summary = await self._db.get_summary(thread_id)
         if summary:
             chat.append({"role": "system", "content": f"Thread summary: {summary}"})
         recent = await self._db.get_thread_messages(thread_id, self._s.max_context_messages)
-        # recent are DESC by created_at; reverse to chronological
-        for m in reversed(recent):
+        for m in reversed(recent):  # chronological
             chat.append({"role": str(m["role"]), "content": str(m["content"])})
         return chat
+
+    async def _maybe_tool_call(self, messages: List[Dict[str, Any]], model_text: str, raw_resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Detect single tool call and execute
+        try:
+            tool_calls = raw_resp.get("choices", [{}])[0].get("message", {}).get("tool_calls")
+        except Exception:
+            tool_calls = None
+        if not tool_calls:
+            return messages
+        call = tool_calls[0]
+        fn = call.get("function", {})
+        name = str(fn.get("name", ""))
+        arguments = fn.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                args_obj = json.loads(arguments)
+            except Exception:
+                args_obj = {}
+        elif isinstance(arguments, dict):
+            args_obj = arguments
+        else:
+            args_obj = {}
+        tool = self._tools.get(name)
+        if not tool:
+            log_error("tool_not_found", tool=name)
+            return messages
+        t0 = time.perf_counter()
+        try:
+            result = await tool.invoke(**args_obj)
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            result = {"error": str(e)}
+            ok = False
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        log_info("tool_call", tool=name, latency_ms=dt_ms, status="ok" if ok else "error")
+        messages.append({"role": "tool", "name": name, "content": json.dumps(result, ensure_ascii=False)})
+        return messages
 
     async def respond(
         self,
@@ -39,31 +80,46 @@ class LocalResponsesService:
         user_text: str,
         store: bool,
     ) -> Tuple[str, str, str, Dict[str, int], str]:
-        """Generate assistant response and optionally store messages.
-
-        Returns: (user_msg_id, resp_msg_id, output_text, usage, actual_thread_id)
-        """
         # Resolve thread id
         actual_thread_id = await self._db.resolve_thread(previous_response_id, thread_id)
 
-        # Optionally store user message
+        # Store user message if requested
         if store:
             user_msg_id = await self._db.insert_message(actual_thread_id, "user", user_text)
         else:
             user_msg_id = str(uuid.uuid4())
 
-        # Build context and call LLM
+        # Build minimal context and call LLM with tools
         chat = await self.build_context(actual_thread_id)
         chat.append({"role": "user", "content": user_text})
-        output_text, usage = await self._llm.chat(chat)
+        tools = tools_openai_format()
+        t0 = time.perf_counter()
+        text, usage = await self._llm.chat(chat, tools=tools)
+        raw = await self._llm.chat_raw(chat, tools=tools)
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        log_info("llm_response", thread_id=actual_thread_id, latency_ms=dt_ms)
 
-        # Optionally store assistant message
+        chat = await self._maybe_tool_call(chat + [{"role": "assistant", "content": text}], text, raw)
+        # If we appended a tool message, make a final call
+        if chat and chat[-1].get("role") == "tool":
+            t1 = time.perf_counter()
+            text2, usage2 = await self._llm.chat(chat, tools=tools)
+            dt_ms2 = int((time.perf_counter() - t1) * 1000)
+            log_info("llm_response", thread_id=actual_thread_id, latency_ms=dt_ms2)
+            text = text2
+            usage = {
+                "prompt_tokens": int(usage.get("prompt_tokens", 0)) + int(usage2.get("prompt_tokens", 0)),
+                "completion_tokens": int(usage.get("completion_tokens", 0)) + int(usage2.get("completion_tokens", 0)),
+                "total_tokens": int(usage.get("total_tokens", 0)) + int(usage2.get("total_tokens", 0)),
+            }
+
+        # Store assistant message
         if store:
-            assistant_msg_id = await self._db.insert_message(actual_thread_id, "assistant", output_text)
+            assistant_msg_id = await self._db.insert_message(actual_thread_id, "assistant", text)
         else:
             assistant_msg_id = str(uuid.uuid4())
 
-        # Store response record (even if not storing messages, record the transaction)
+        # Record response
         resp_id = await self._db.insert_response(
             actual_thread_id,
             input_message_id=user_msg_id,
@@ -73,24 +129,15 @@ class LocalResponsesService:
         )
         await self._db.update_response_output(resp_id, assistant_msg_id, status="completed")
 
-        # Summarize opportunistically if threshold reached
+        # Opportunistic summarization trigger by count
         try:
-            row = await self._db.fetch_one(
-                "SELECT COUNT(1) AS n FROM messages WHERE thread_id=?",
-                [actual_thread_id],
-            )
+            row = await self._db.fetch_one("SELECT COUNT(1) AS n FROM messages WHERE thread_id=?", [actual_thread_id])
             count = int(row["n"]) if row else 0
             if count >= self._s.summarize_after_messages and store:
-                summarize_chat = [
-                    {"role": "system", "content": "Summarize the following conversation in 1-2 sentences."},
-                    *chat,
-                    {"role": "assistant", "content": output_text},
-                ]
-                summary_text, _ = await self._llm.chat(summarize_chat)
-                await self._db.upsert_summary(actual_thread_id, summary_text.strip())
-                log_info("summary_updated", thread_id=actual_thread_id)
+                from . import summarizer
+
+                await summarizer.summarize(actual_thread_id)
         except Exception:
-            # Do not break response flow if summary fails
             pass
 
-        return user_msg_id, resp_id, output_text, usage, actual_thread_id
+        return user_msg_id, resp_id, text, usage, actual_thread_id
