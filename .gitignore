@@ -345,6 +345,7 @@ ENV/
 *.csproj*
 *.vbproj*
 *.pyproj
+*.pyproj.user
 *.vc.db
 *.opendb
 *.suo
@@ -384,3 +385,4 @@ files/*
 .mypy_cache/
 .coverage
 htmlcov/
+/Local Ai.pyproj
