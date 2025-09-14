@@ -24,6 +24,8 @@ Copy `.env.example` to `.env` and adjust values.
 - `GET /threads/{thread_id}/summary` -> current summary
 - `POST /threads/{thread_id}/summarize` -> force summarization
 - `GET /file/{id}` -> serve local file from ./files/{id}
+- `GET /config` -> runtime non-secret config (includes upload limits)
+- UI: `GET /` (chat), `POST /ui/upload` (file upload)
 
 ## Tool calling demo (vision)
 1) Put a file into `./files`, e.g. `./files/cat.jpg`
@@ -65,7 +67,23 @@ curl -s -X POST "$LM_BASE_URL/chat/completions" \
   }' | jq .
 ```
 
+## File uploads
+- Configurable limits via env: `LOCALAPI_MAX_UPLOAD_MB` and `LOCALAPI_ALLOWED_EXTS` (CSV). UI-friendly overrides: `LOCALAI_MAX_UPLOAD_MB`, `LOCALAI_ALLOWED_EXTS`.
+- Files are stored under `./files` named as `<sha256><original_suffix>`. Duplicate content is deduplicated by hash.
+
+Examples:
+```bash
+# success
+curl -F "file=@tests/cat.jpg" http://127.0.0.1:8080/ui/upload
+
+# too large -> 413
+curl -i -F "file=@big.bin" http://127.0.0.1:8080/ui/upload
+
+# wrong type -> 400
+curl -i -F "file=@malware.exe" http://127.0.0.1:8080/ui/upload
+```
+
 ## Notes
 - On startup, app applies `schema.sql` to SQLite DB at the path from env (default `data/local_api.db`).
 - Logs are JSON to stdout via stdlib logging + json formatter.
-- The vision_describe tool calls LM Studio model qwen2.5-vl-7b-instruct@q8_0 with multimodal messages and returns structured JSON.
+- Vision tool uses LM Studio model qwen2.5-vl-7b-instruct@q8_0 (multimodal).

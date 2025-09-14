@@ -1,6 +1,8 @@
 """Application configuration using pydantic-settings.
 
-Environment variables (prefix LOCALAPI_):
+Environment variables (prefix LOCALAPI_ by default). Also supports specific LOCALAI_* overrides
+for upload settings to match UI requirements.
+
 - LOCALAPI_API_HOST (default: 0.0.0.0)
 - LOCALAPI_API_PORT (default: 8080)
 - LOCALAPI_DATABASE_PATH (default: data/local_api.db)
@@ -14,11 +16,20 @@ Environment variables (prefix LOCALAPI_):
 - LOCALAPI_REQUEST_TIMEOUT (seconds, default: 120)
 - LOCALAPI_LOG_LEVEL (default: INFO)
 - LOCALAPI_FILES_DIR (default: files)
+
+Upload-related (also accepts LOCALAI_* overrides):
+- LOCALAPI_MAX_UPLOAD_MB (default: 25)
+- LOCALAPI_ALLOWED_EXTS (CSV, default: .png,.jpg,.jpeg,.webp,.gif,.pdf,.txt)
+- LOCALAI_MAX_UPLOAD_MB (override)
+- LOCALAI_ALLOWED_EXTS (override)
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
-from pydantic import Field
+from typing import List
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +56,18 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     files_dir: str = Field(default="files")
 
+    # Upload settings (can be overridden by LOCALAI_* env vars)
+    max_upload_mb: int = Field(default=25, ge=1)
+    allowed_exts: List[str] = Field(default_factory=lambda: [
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".pdf",
+        ".txt",
+    ])
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="LOCALAPI_",
@@ -52,8 +75,35 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @field_validator("allowed_exts", mode="before")
+    @classmethod
+    def _parse_allowed_exts(cls, v: object) -> object:
+        if isinstance(v, str):
+            parts = [p.strip().lower() for p in v.split(",") if p.strip()]
+            norm = [p if p.startswith(".") else f".{p}" for p in parts]
+            return norm
+        if isinstance(v, list):
+            return [str(p).lower() if str(p).startswith(".") else f".{str(p).lower()}" for p in v]
+        return v
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return cached settings instance."""
-    return Settings()
+    """Return cached settings instance.
+
+    Also honor LOCALAI_MAX_UPLOAD_MB and LOCALAI_ALLOWED_EXTS as overrides
+    for DX compatibility with UI prompts.
+    """
+    overrides = {}
+    if "LOCALAI_MAX_UPLOAD_MB" in os.environ:
+        try:
+            overrides["max_upload_mb"] = int(os.environ["LOCALAI_MAX_UPLOAD_MB"])
+        except Exception:
+            pass
+    if "LOCALAI_ALLOWED_EXTS" in os.environ:
+        overrides["allowed_exts"] = os.environ["LOCALAI_ALLOWED_EXTS"]
+    return Settings(**overrides)
+
+
+# Optional module-level singleton for direct import in UI code
+settings = get_settings()

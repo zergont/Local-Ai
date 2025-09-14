@@ -3,25 +3,72 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 import secrets
 import shutil
+import hashlib
+
+from .logging_utils import log_error, log_info
+from .config import settings
 
 router = APIRouter(tags=["ui"])
 
-BASE_FILES = Path("files")
+BASE_FILES = Path(settings.files_dir).resolve()
 BASE_FILES.mkdir(parents=True, exist_ok=True)
+
+
+def _is_allowed_mime(mime: str) -> bool:
+    if not mime:
+        return False
+    if mime.startswith("image/"):
+        return True
+    return mime in {"application/pdf", "text/plain"}
 
 
 @router.post("/ui/upload")
 async def ui_upload(file: UploadFile = File(...)):
-    # простая защита имени и расширения
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf", ".txt"}:
-        raise HTTPException(400, "unsupported file type")
-    name = f"{secrets.token_hex(8)}{suffix}"
-    dest = (BASE_FILES / name).resolve()
-    # сохраняем
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
-    return {"url": f"/file/{name}"}
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in settings.allowed_exts:
+        raise HTTPException(400, f"unsupported file type: {suffix}")
+    if not _is_allowed_mime(file.content_type or ""):
+        raise HTTPException(400, f"unsupported mime: {file.content_type}")
+
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    h = hashlib.sha256()
+    tmp = (BASE_FILES / f".upload-{secrets.token_hex(8)}{suffix}").resolve()
+    if BASE_FILES not in tmp.parents:
+        raise HTTPException(400, "bad path")
+
+    size = 0
+    try:
+        with tmp.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    out.close()
+                    tmp.unlink(missing_ok=True)
+                    raise HTTPException(413, f"file too large (>{settings.max_upload_mb} MB)")
+                h.update(chunk)
+                out.write(chunk)
+        digest = h.hexdigest()
+        final_path = (BASE_FILES / f"{digest}{suffix}").resolve()
+        if BASE_FILES not in final_path.parents:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(400, "bad path")
+        if final_path.exists():
+            tmp.unlink(missing_ok=True)
+            exists = True
+        else:
+            tmp.replace(final_path)
+            exists = False
+        log_info("ui_upload", size=size, mime=file.content_type, name=final_path.name, status="ok", dedup=exists)
+        return {"url": f"/file/{final_path.name}", "size": size}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log_error("ui_upload_error", error=str(e))
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, "internal error")
 
 
 @router.get("/", response_class=HTMLResponse)

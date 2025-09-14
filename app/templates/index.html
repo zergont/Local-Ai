@@ -81,9 +81,12 @@ async function uploadFile(file){
   const fd = new FormData();
   fd.append('file', file);
   const res = await fetch(api('/ui/upload'), { method:'POST', body: fd });
-  if(!res.ok){ throw new Error('upload failed'); }
-  const j = await res.json();
-  return j.url; // /file/<name>
+  if(!res.ok){
+    if(res.status === 413) throw new Error('Файл слишком большой');
+    const text = await res.text();
+    throw new Error(text || 'Ошибка загрузки');
+  }
+  return res.json();
 }
 
 elFile.addEventListener('change', async (e)=>{
@@ -91,11 +94,11 @@ elFile.addEventListener('change', async (e)=>{
   if(!f) return;
   elStatus.textContent = 'Загрузка файла…';
   try{
-    const url = await uploadFile(f);
-    elInput.value = (elInput.value ? elInput.value + '\n' : '') + url;
-    elStatus.textContent = 'Файл готов: ' + url;
+    const j = await uploadFile(f);
+    elInput.value = (elInput.value ? elInput.value + '\n' : '') + j.url;
+    elStatus.textContent = 'Файл готов: ' + j.url;
   }catch(err){
-    elStatus.textContent = 'Ошибка загрузки';
+    elStatus.textContent = err.message || 'Ошибка загрузки';
   }finally{
     elFile.value = '';
   }
