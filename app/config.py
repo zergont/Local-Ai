@@ -7,7 +7,7 @@ for upload settings to match UI requirements.
 - LOCALAPI_API_PORT (default: 8080)
 - LOCALAPI_DATABASE_PATH (default: data/local_api.db)
 - LOCALAPI_LLM_BASE_URL (default: http://192.168.0.111:1234/v1)
-- LOCALAPI_LLM_MODEL (default: local-model)
+- LOCALAPI_LLM_MODEL (default: qwen/qwen3-14b)
 - LOCALAPI_VISION_MODEL (default: qwen2.5-vl-7b-instruct@q8_0)
 - LOCALAPI_TEMPERATURE (default: 0.2)
 - LOCALAPI_MAX_TOKENS (default: 512)
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     database_path: str = Field(default="data/local_api.db")
 
     llm_base_url: str = Field(default="http://192.168.0.111:1234/v1")
-    llm_model: str = Field(default="local-model")
+    llm_model: str = Field(default="qwen/qwen3-14b")
     vision_model: str = Field(default="qwen2.5-vl-7b-instruct@q8_0")
 
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)

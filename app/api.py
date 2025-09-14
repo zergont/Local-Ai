@@ -63,6 +63,58 @@ def create_app() -> FastAPI:
     # expose service to ws router via app.state
     app.state.service = service
     app.state.llm_online = False
+    app.state.llm_probe_task = None
+
+    async def _probe_llm_once() -> tuple[bool, int | None]:
+        """Try to GET /models once, return (ok, models_count)."""
+        base = settings.llm_base_url.rstrip("/")
+        url = f"{base}/models"
+        t0 = time.perf_counter()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        n_models = len(data.get("data", [])) if isinstance(data, dict) else None
+        return True, n_models
+
+    async def _llm_watchdog() -> None:
+        """Background task: if LLM оффлайн, пытаться подключаться каждые 30 сек.
+        При успехе — показывать баннер и помечать online, затем завершиться.
+        """
+        base = settings.llm_base_url.rstrip("/")
+        attempt = 0
+        while True:
+            if app.state.llm_online:
+                return
+            attempt += 1
+            # информируем о попытке соединения
+            log_info("проверка_llm_повтор", база=base, попытка=attempt, сообщение="Фоновая попытка подключения к LLM")
+            try:
+                ok, n = await _probe_llm_once()
+                if ok:
+                    app.state.llm_online = True
+                    log_info(
+                        "проверка_llm_успех",
+                        база=base,
+                        задержка_мс=0,
+                        моделей=n,
+                        сообщение="Связь с LLM установлена (фоновая проверка)",
+                    )
+                    print_banner(
+                        "LLM — подключен",
+                        [
+                            f"LLM API: {settings.llm_base_url}",
+                            f"Модель диалога: {settings.llm_model}",
+                            f"Доступных моделей: {n if n is not None else '—'}",
+                        ],
+                    )
+                    return
+            except Exception:
+                # тихо ждём следующую попытку
+                await asyncio.sleep(30)
+                continue
+            await asyncio.sleep(30)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -132,11 +184,20 @@ def create_app() -> FastAPI:
                     "Проверьте адрес/порт, доступность LM Studio и значения переменных окружения.",
                 ],
             )
+            # start background watchdog to retry every 30s until success
+            app.state.llm_probe_task = asyncio.create_task(_llm_watchdog())
         # Init summarizer module
         summarizer.init(db, llm)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        # cancel watchdog if running
+        task = getattr(app.state, "llm_probe_task", None)
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:
+                pass
         await llm.aclose()
         await db.close()
         log_info("остановка", сообщение="Сервис остановлен")
