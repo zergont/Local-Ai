@@ -3,7 +3,7 @@
 Environment variables (prefix LOCALAPI_ by default). Also supports specific LOCALAI_* overrides
 for upload settings to match UI requirements.
 
-- LOCALAPI_API_HOST (default: 0.0.0.0)
+- LOCALAPI_API_HOST (default: 127.0.0.1)
 - LOCALAPI_API_PORT (default: 8080)
 - LOCALAPI_DATABASE_PATH (default: data/local_api.db)
 - LOCALAPI_LLM_BASE_URL (default: http://192.168.0.111:1234/v1)
@@ -36,7 +36,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Typed application settings."""
 
-    api_host: str = Field(default="0.0.0.0")
+    api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8080)
 
     database_path: str = Field(default="data/local_api.db")

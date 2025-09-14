@@ -13,6 +13,7 @@ from .logging_utils import log_info, log_error
 from .tooling import list_tools, tools_openai_format, maybe_call_one_tool
 
 
+# Keep system prompt minimal; do not block chain-of-thought explicitly.
 SYSTEM_PROMPT = "You are a helpful assistant. Be concise."
 
 
@@ -102,6 +103,7 @@ class LocalResponsesService:
                 "completion_tokens": int(usage.get("completion_tokens", 0)) + int(usage2.get("completion_tokens", 0)),
                 "total_tokens": int(usage.get("total_tokens", 0)) + int(usage2.get("total_tokens", 0)),
             }
+        # Store and return raw assistant text (UI collapses reasoning safely)
         if store:
             assistant_msg_id = await self._db.insert_message(actual_thread_id, "assistant", text)
         else:
@@ -131,7 +133,7 @@ class LocalResponsesService:
         messages.append({"role": "user", "content": user_text})
         tools = tools_openai_format()
         probe_raw = await self._llm.chat_raw(messages, tools=tools)
-        messages, tool_called = await maybe_call_one_tool(messages + [{"role": "assistant", "content": ""}], probe_raw)
+        messages, _ = await maybe_call_one_tool(messages + [{"role": "assistant", "content": ""}], probe_raw)
         response_id = str(uuid.uuid4())
         yield {"type": "start", "response_id": response_id, "thread_id": actual_thread_id}
         buf: List[str] = []

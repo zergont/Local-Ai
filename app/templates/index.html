@@ -6,24 +6,34 @@
   <title>Local AI — Chat</title>
   <style>
     :root{--bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#a8b3cf;--acc:#4da3ff;}
+    *{box-sizing:border-box}
+    *::before,*::after{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Arial}
-    header{padding:16px 20px;border-bottom:1px solid #232836;background:#0f1115;position:sticky;top:0}
+    header{padding:16px 20px;border-bottom:1px solid #232836;background:#0f1115;position:sticky;top:0;z-index:100}
     .wrap{max-width:980px;margin:0 auto;padding:20px}
     .row{display:flex;gap:12px;align-items:center}
     .card{background:var(--card);border:1px solid #232836;border-radius:14px;padding:14px}
-    .msgs{display:flex;flex-direction:column;gap:12px}
+    .msgs{display:flex;flex-direction:column;gap:12px;padding-bottom:24px}
     .msg{padding:12px;border-radius:12px}
     .u{background:#1e2430}
     .a{background:#131722}
     .meta{color:var(--muted);font-size:12px;margin-top:6px}
     button,input,textarea{font:inherit}
     textarea{width:100%;min-height:80px;resize:vertical;background:#0f1115;color:var(--text);border:1px solid #232836;border-radius:12px;padding:10px}
-    .controls{display:flex;gap:8px;align-items:center;margin-top:8px}
+    .controls{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
     .controls button{background:var(--acc);border:none;color:#081120;padding:10px 14px;border-radius:10px;cursor:pointer}
     .controls input[type=file]{display:none}
     .pill{color:var(--muted);font-size:12px}
     a{color:#8ecbff}
     .kbd{font:12px/1 monospace;background:#0b0d12;border:1px solid #232836;border-radius:6px;padding:2px 6px}
+
+    /* Размышления: контейнер со скроллом после 3 строк */
+    .reasoning{background:#0b0d12;border:1px solid #232836;border-radius:10px;padding:8px;margin:8px 0}
+    .reasoning-header{color:var(--muted);font-size:12px;margin-bottom:6px}
+    .reasoning-body{max-height:calc(1.5em * 3);overflow:auto;white-space:pre-wrap;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+
+    /* Композер закреплён внизу */
+    .composer{position:sticky;bottom:0;z-index:90;margin-top:8px}
   </style>
 </head>
 <body>
@@ -37,7 +47,7 @@
 <main class="wrap">
   <div id="messages" class="msgs"></div>
 
-  <div class="card" style="margin-top:16px">
+  <div class="card composer">
     <textarea id="input" placeholder="Напишите сообщение..."></textarea>
     <div class="controls">
       <label for="file"><span class="kbd">+</span> Вложение</label>
@@ -62,6 +72,11 @@ const elNew = document.getElementById('new');
 const elStatus = document.getElementById('status');
 const elPill = document.getElementById('thread-pill');
 
+function scrollToBottom(){
+  try{ window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' }); }
+  catch(_){ window.scrollTo(0, document.documentElement.scrollHeight); }
+}
+
 function setThread(id){
   threadId = id;
   if(id){ localStorage.setItem('thread_id', id); elPill.textContent = 'thread: ' + id.slice(0,8) + '…'; }
@@ -69,12 +84,14 @@ function setThread(id){
 }
 setThread(threadId);
 
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
 function addMsg(role, text){
   const div = document.createElement('div');
   div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
-  div.innerHTML = text.replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  div.innerHTML = escapeHtml(text).replace(/\n/g,'<br>');
   elMsgs.appendChild(div);
-  elMsgs.scrollTop = elMsgs.scrollHeight;
+  scrollToBottom();
 }
 
 async function uploadFile(file){
@@ -104,6 +121,28 @@ elFile.addEventListener('change', async (e)=>{
   }
 });
 
+function createAssistantNode(){
+  const div = document.createElement('div');
+  div.className = 'msg a';
+  const rs = document.createElement('div');
+  rs.className = 'reasoning';
+  rs.style.display = 'none';
+  const rsHead = document.createElement('div');
+  rsHead.className = 'reasoning-header';
+  rsHead.textContent = 'Размышления';
+  const rsBody = document.createElement('div');
+  rsBody.className = 'reasoning-body';
+  rs.appendChild(rsHead);
+  rs.appendChild(rsBody);
+  const body = document.createElement('div');
+  body.className = 'assistant-body';
+  div.appendChild(rs);
+  div.appendChild(body);
+  elMsgs.appendChild(div);
+  scrollToBottom();
+  return { container: div, body, rs, rsBody };
+}
+
 async function sendWS(){
   const text = elInput.value.trim();
   if(!text) return;
@@ -112,21 +151,88 @@ async function sendWS(){
   elStatus.textContent = 'Стрим…';
 
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/respond');
+  let ui = null;
+  let inThink = false;
+  let pending = '';
+  let answerText = '';
+  let reasoningText = '';
+
+  const openTagRe = /<(think|reasoning|thinking)\b[^>]*>/i;
+  const closeTagRe = /<\/\s*(think|reasoning|thinking)\s*>/i;
+
+  function updateUI(){
+    if(!ui) ui = createAssistantNode();
+    ui.body.innerHTML = escapeHtml(answerText).replace(/\n/g,'<br>');
+    if(reasoningText){
+      ui.rs.style.display = '';
+      ui.rsBody.textContent = reasoningText;
+    } else {
+      ui.rs.style.display = 'none';
+    }
+    scrollToBottom();
+  }
+
+  function processPending(){
+    while(pending.length > 0){
+      if(!inThink){
+        const m = pending.match(openTagRe);
+        if(m){
+          const i = m.index;
+          answerText += pending.slice(0, i);
+          pending = pending.slice(i + m[0].length);
+          inThink = true;
+          updateUI();
+        } else {
+          const keep = Math.min(pending.length, 8);
+          const flushLen = pending.length - keep;
+          if(flushLen > 0){
+            answerText += pending.slice(0, flushLen);
+            pending = pending.slice(flushLen);
+            updateUI();
+          } else {
+            break;
+          }
+        }
+      } else {
+        const m = pending.match(closeTagRe);
+        if(m){
+          const i = m.index;
+          reasoningText += pending.slice(0, i);
+          pending = pending.slice(i + m[0].length);
+          inThink = false;
+          updateUI();
+        } else {
+          const keep = Math.min(pending.length, 8);
+          const flushLen = pending.length - keep;
+          if(flushLen > 0){
+            reasoningText += pending.slice(0, flushLen);
+            pending = pending.slice(flushLen);
+            updateUI();
+          } else {
+            break;
+          }
+        }
+      }
+    }
+  }
+
   ws.onopen = () => {
     const payload = { input_text: text, store: true };
     if(threadId) payload.thread_id = threadId;
     ws.send(JSON.stringify(payload));
   };
-  let acc = '';
+
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if(msg.type === 'start'){
       if(!threadId && msg.thread_id) setThread(msg.thread_id);
+      if(!ui) ui = createAssistantNode();
     }else if(msg.type === 'delta'){
-      acc += msg.text;
-      if(acc.length === msg.text.length){ addMsg('assistant', acc); }
-      else { elMsgs.lastChild.innerHTML = acc.replace(/</g,'&lt;').replace(/\n/g,'<br>'); }
+      pending += msg.text;
+      processPending();
     }else if(msg.type === 'end'){
+      processPending();
+      updateUI();
       elStatus.textContent = msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '';
       ws.close();
     }else if(msg.type === 'error'){
