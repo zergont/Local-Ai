@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ру">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -27,10 +27,11 @@
     a{color:#8ecbff}
     .kbd{font:12px/1 monospace;background:#0b0d12;border:1px solid #232836;border-radius:6px;padding:2px 6px}
 
-    /* Размышления: контейнер со скроллом после 3 строк */
-    .reasoning{background:#0b0d12;border:1px solid #232836;border-radius:10px;padding:8px;margin:8px 0}
-    .reasoning-header{color:var(--muted);font-size:12px;margin-bottom:6px}
-    .reasoning-body{max-height:calc(1.5em * 3);overflow:auto;white-space:pre-wrap;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+    /* Размышления под спойлером */
+    details.reasoning{background:#0b0d12;border:1px solid #232836;border-radius:10px;padding:8px;margin:8px 0}
+    details.reasoning > summary.reasoning-header{color:var(--muted);font-size:12px;cursor:pointer;user-select:none;outline:none}
+    details.reasoning > .reasoning-body{margin-top:6px;max-height:240px;overflow:auto;white-space:pre-wrap;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+    details.reasoning > summary::-webkit-details-marker{color:var(--muted)}
 
     /* Композер закреплён внизу */
     .composer{position:sticky;bottom:0;z-index:90;margin-top:8px}
@@ -124,10 +125,10 @@ elFile.addEventListener('change', async (e)=>{
 function createAssistantNode(){
   const div = document.createElement('div');
   div.className = 'msg a';
-  const rs = document.createElement('div');
+  const rs = document.createElement('details');
   rs.className = 'reasoning';
-  rs.style.display = 'none';
-  const rsHead = document.createElement('div');
+  rs.style.display = 'none'; // показываем только когда начнутся размышления
+  const rsHead = document.createElement('summary');
   rsHead.className = 'reasoning-header';
   rsHead.textContent = 'Размышления';
   const rsBody = document.createElement('div');
@@ -163,7 +164,8 @@ async function sendWS(){
   function updateUI(){
     if(!ui) ui = createAssistantNode();
     ui.body.innerHTML = escapeHtml(answerText).replace(/\n/g,'<br>');
-    if(reasoningText){
+    // Показываем спойлер, если уже идёт think или накоплен текст размышлений
+    if(reasoningText || inThink){
       ui.rs.style.display = '';
       ui.rsBody.textContent = reasoningText;
     } else {
@@ -172,7 +174,7 @@ async function sendWS(){
     scrollToBottom();
   }
 
-  function processPending(){
+  function processPending(final=false){
     while(pending.length > 0){
       if(!inThink){
         const m = pending.match(openTagRe);
@@ -183,6 +185,12 @@ async function sendWS(){
           inThink = true;
           updateUI();
         } else {
+          if(final){
+            answerText += pending;
+            pending = '';
+            updateUI();
+            break;
+          }
           const keep = Math.min(pending.length, 8);
           const flushLen = pending.length - keep;
           if(flushLen > 0){
@@ -202,6 +210,12 @@ async function sendWS(){
           inThink = false;
           updateUI();
         } else {
+          if(final){
+            reasoningText += pending;
+            pending = '';
+            updateUI();
+            break;
+          }
           const keep = Math.min(pending.length, 8);
           const flushLen = pending.length - keep;
           if(flushLen > 0){
@@ -229,9 +243,10 @@ async function sendWS(){
       if(!ui) ui = createAssistantNode();
     }else if(msg.type === 'delta'){
       pending += msg.text;
-      processPending();
+      processPending(false);
     }else if(msg.type === 'end'){
-      processPending();
+      pending += '';
+      processPending(true); // финальная обработка — слить остатки
       updateUI();
       elStatus.textContent = msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '';
       ws.close();
