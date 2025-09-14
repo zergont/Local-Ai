@@ -2,7 +2,7 @@
 
 - Tool Protocol (name, parameters_schema, async invoke)
 - VisionDescribeTool: calls LM Studio multimodal model; strict args validation
-- list_tools(), tools_openai_format()
+- list_tools(), tools_openai_format(), maybe_call_one_tool()
 - now_ts(), new_id()
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ __all__ = [
     "Tool",
     "list_tools",
     "tools_openai_format",
+    "maybe_call_one_tool",
     "now_ts",
     "new_id",
 ]
@@ -201,3 +202,39 @@ def tools_openai_format() -> List[Dict[str, Any]]:
             }
         )
     return tools
+
+
+async def maybe_call_one_tool(messages: List[Dict[str, Any]], probe_raw: Dict[str, Any]) -> tuple[List[Dict[str, Any]], bool]:
+    """If probe_raw contains a tool call, execute it and append tool message to messages.
+
+    Returns possibly modified messages and a flag whether a tool was called.
+    """
+    try:
+        tool_calls = probe_raw.get("choices", [{}])[0].get("message", {}).get("tool_calls")
+    except Exception:
+        tool_calls = None
+    if not tool_calls:
+        return messages, False
+    call = tool_calls[0]
+    fn = call.get("function", {})
+    name = str(fn.get("name", ""))
+    arguments = fn.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            args_obj = json.loads(arguments)
+        except Exception:
+            args_obj = {}
+    elif isinstance(arguments, dict):
+        args_obj = arguments
+    else:
+        args_obj = {}
+    tool_map = {t.name: t for t in list_tools()}
+    tool = tool_map.get(name)
+    if not tool:
+        return messages, False
+    try:
+        result = await tool.invoke(**args_obj)
+    except Exception as e:  # noqa: BLE001
+        result = {"error": str(e)}
+    messages = messages + [{"role": "tool", "name": name, "content": json.dumps(result, ensure_ascii=False)}]
+    return messages, True

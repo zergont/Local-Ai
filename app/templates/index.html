@@ -52,6 +52,7 @@
 <script>
 const api = (path) => path.startsWith('http') ? path : (location.origin + path);
 let threadId = localStorage.getItem('thread_id') || null;
+let useWS = true;
 
 const elMsgs = document.getElementById('messages');
 const elInput = document.getElementById('input');
@@ -91,7 +92,6 @@ elFile.addEventListener('change', async (e)=>{
   elStatus.textContent = 'Загрузка файла…';
   try{
     const url = await uploadFile(f);
-    // подставляем ссылку в поле ввода
     elInput.value = (elInput.value ? elInput.value + '\n' : '') + url;
     elStatus.textContent = 'Файл готов: ' + url;
   }catch(err){
@@ -101,7 +101,41 @@ elFile.addEventListener('change', async (e)=>{
   }
 });
 
-async function send(){
+async function sendWS(){
+  const text = elInput.value.trim();
+  if(!text) return;
+  addMsg('user', text);
+  elInput.value = '';
+  elStatus.textContent = 'Стрим…';
+
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/respond');
+  ws.onopen = () => {
+    const payload = { input_text: text, store: true };
+    if(threadId) payload.thread_id = threadId;
+    ws.send(JSON.stringify(payload));
+  };
+  let acc = '';
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if(msg.type === 'start'){
+      if(!threadId && msg.thread_id) setThread(msg.thread_id);
+    }else if(msg.type === 'delta'){
+      acc += msg.text;
+      if(acc.length === msg.text.length){ addMsg('assistant', acc); }
+      else { elMsgs.lastChild.innerHTML = acc.replace(/</g,'&lt;').replace(/\n/g,'<br>'); }
+    }else if(msg.type === 'end'){
+      elStatus.textContent = msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '';
+      ws.close();
+    }else if(msg.type === 'error'){
+      addMsg('assistant', '⚠️ Ошибка: ' + (msg.message || 'internal'));
+      elStatus.textContent = 'Ошибка';
+      ws.close();
+    }
+  };
+  ws.onerror = () => { addMsg('assistant','⚠️ WS error'); elStatus.textContent = 'Ошибка'; };
+}
+
+async function sendPOST(){
   const text = elInput.value.trim();
   if(!text) return;
   addMsg('user', text);
@@ -129,14 +163,15 @@ async function send(){
   }
 }
 
+function send(){
+  if(useWS && 'WebSocket' in window){ sendWS(); }
+  else { sendPOST(); }
+}
+
 elSend.addEventListener('click', send);
-elInput.addEventListener('keydown', (e)=>{
-  if((e.metaKey || e.ctrlKey) && e.key === 'Enter'){ send(); }
-});
-elNew.addEventListener('click', ()=>{
-  setThread(null);
-  addMsg('assistant', '— Новый диалог —');
-});
+elInput.addEventListener('keydown', (e)=>{ if((e.metaKey || e.ctrlKey) && e.key === 'Enter'){ send(); } });
+
+elNew.addEventListener('click', ()=>{ setThread(null); addMsg('assistant', '— Новый диалог —'); });
 </script>
 </body>
 </html>

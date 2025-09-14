@@ -35,6 +35,7 @@ from .models import ResponsePayload, ResponseRequest
 from .service import LocalResponsesService
 from . import summarizer
 from .ui import router as ui_router
+from .ws import router as ws_router
 
 
 class ORJSONResponse2(ORJSONResponse):
@@ -49,10 +50,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Local Responses API", default_response_class=ORJSONResponse2)
 
     app.include_router(ui_router)
+    app.include_router(ws_router)
 
     db = Database(settings.database_path)
     llm = LLMClient()
     service = LocalResponsesService(db, llm)
+
+    # expose service to ws router via app.state
+    app.state.service = service
 
     @app.on_event("startup")
     async def _startup() -> None:
