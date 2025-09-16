@@ -66,15 +66,15 @@ def create_app() -> FastAPI:
             schema_sql = schema_path.read_text(encoding="utf-8")
             await db.executescript(schema_sql)
             log_info(
-                "запуск",
-                сообщение="Сервис Local AI запущен",
-                бд=db.path,
-                llm_адрес=settings.llm_base_url,
-                схема=str(schema_path),
-                чат_модель=settings.llm_model,
-                вижн_модель=settings.vision_model,
-                макс_загрузка_мб=settings.max_upload_mb,
-                разрешённые_расширения=settings.allowed_exts,
+                "startup",
+                message="Local AI service started",
+                db_path=db.path,
+                llm_url=settings.llm_base_url,
+                schema_path=str(schema_path),
+                chat_model=settings.llm_model,
+                vision_model=settings.vision_model,
+                max_upload_mb=settings.max_upload_mb,
+                allowed_extensions=settings.allowed_exts,
                 base_url=settings.app_base_url,
             )
             print_banner(
@@ -89,7 +89,7 @@ def create_app() -> FastAPI:
                 ],
             )
         except Exception as e:  # noqa: BLE001
-            log_error("ошибка_схемы", сообщение="Не удалось применить schema.sql", ошибка=str(e))
+            log_error("schema_error", message="Failed to apply schema.sql", error=str(e))
             raise
         # Probe LLM connectivity (GET /models) with retries
         base = settings.llm_base_url.rstrip("/")
@@ -104,16 +104,16 @@ def create_app() -> FastAPI:
                     data = resp.json()
                 n_models = len(data.get("data", [])) if isinstance(data, dict) else None
                 dt_ms = int((time.perf_counter() - t0) * 1000)
-                log_info("проверка_llm_успех", база=base, задержка_мс=dt_ms, моделей=n_models, сообщение="Связь с LLM установлена")
+                log_info("llm_probe_success", base_url=base, latency_ms=dt_ms, models_count=n_models, message="LLM connection established")
                 app.state.llm_online = True
                 break
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 dt_ms = int((time.perf_counter() - t0) * 1000)
-                log_error("проверка_llm_ошибка", база=base, задержка_мс=dt_ms, попытка=attempt, ошибка=f"{type(e).__name__}: {str(e)}")
+                log_error("llm_probe_error", base_url=base, latency_ms=dt_ms, attempt=attempt, error=f"{type(e).__name__}: {str(e)}")
                 await asyncio.sleep(0.25 * (2 ** (attempt - 1)))
         if not app.state.llm_online:
-            log_error("проверка_llm_не_доступен", база=base, ошибка=str(last_err) if last_err else "неизвестно")
+            log_error("llm_unavailable", base_url=base, error=str(last_err) if last_err else "unknown")
             print_banner(
                 "Внимание: LLM недоступен",
                 [
@@ -128,7 +128,7 @@ def create_app() -> FastAPI:
     async def _shutdown() -> None:
         await llm.aclose()
         await db.close()
-        log_info("остановка", сообщение="Сервис остановлен")
+        log_info("shutdown", message="Service stopped")
         print_banner("Local AI — сервер остановлен", [])
 
     @app.get("/config")
@@ -145,20 +145,8 @@ def create_app() -> FastAPI:
             "CONTEXT_WINDOW_TOKENS": s.context_window_tokens,
             "CONTEXT_PROMPT_BUDGET_RATIO": s.context_prompt_budget_ratio,
             "CONTEXT_HYSTERESIS_TOKENS": s.context_hysteresis_tokens,
-            "THINK_RENDER_MODE": s.think_render_mode,
             "APP_BASE_URL": s.app_base_url,
         }
-
-    @app.post("/config/think-mode")
-    async def post_think_mode(payload: dict[str, Any]) -> dict[str, Any]:
-        mode = str(payload.get("mode", "")).strip().lower()
-        if mode not in {"hide", "spoiler"}:
-            raise HTTPException(status_code=400, detail="invalid mode")
-        # mutate runtime setting
-        svc: LocalResponsesService = app.state.service
-        svc._s.think_render_mode = mode  # type: ignore[attr-defined]
-        log_info("think_mode_set", mode=mode)
-        return {"THINK_RENDER_MODE": mode}
 
     @app.post("/responses", response_model=ResponsePayload)
     async def post_responses(req: ResponseRequest) -> ResponsePayload:
@@ -174,10 +162,10 @@ def create_app() -> FastAPI:
             return ResponsePayload(response_id=resp_id, thread_id=actual_thread_id, output_text=output_text, status="completed", usage=usage)
         except Exception as e:  # noqa: BLE001
             if resp_id:
-                log_error("ошибка_post_responses", ошибка=str(e), trace_id=rid, response_id=resp_id)
+                log_error("post_responses_error", error=str(e), trace_id=rid, response_id=resp_id)
             else:
-                log_error("ошибка_post_responses", ошибка=str(e), trace_id=rid)
-            detail: dict[str, Any] = {"error": "внутренняя ошибка", "trace_id": rid}
+                log_error("post_responses_error", error=str(e), trace_id=rid)
+            detail: dict[str, Any] = {"error": "internal error", "trace_id": rid}
             if resp_id:
                 detail["response_id"] = resp_id
             raise HTTPException(status_code=500, detail=detail)
@@ -205,7 +193,7 @@ def create_app() -> FastAPI:
             text = await summarizer.summarize(thread_id)
             return {"thread_id": thread_id, "summary": text}
         except Exception as e:  # noqa: BLE001
-            log_error("ошибка_сводки", thread_id=thread_id, ошибка=str(e))
+            log_error("summarize_error", thread_id=thread_id, error=str(e))
             raise HTTPException(status_code=500, detail="internal error")
 
     @app.get("/file/{file_id}")

@@ -41,8 +41,6 @@ SYSTEM_PROMPT = (
     "You are a helpful assistant. Be concise. "
     "If you need to deliberate or outline steps, put ALL of that inside <think>…</think> and write the final answer after the tag."
 )
-THINK_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
-CYR_RE = re.compile(r"[\u0400-\u052F]")
 MEMORY_NAME_RE = re.compile(r"запомни,? что меня зовут (.+)$", re.IGNORECASE)
 
 
@@ -51,65 +49,6 @@ class LocalResponsesService:
         self._db = db
         self._llm = llm
         self._s = get_settings()
-
-    def _wrap_think_block(self, inner: str) -> str:
-        inner = inner.strip()
-        if not inner:
-            return ""
-        esc = inner.replace("<", "&lt;")
-        return f"<details><summary>Рассуждения</summary>\n<pre>{esc}</pre></details>\n"
-
-    def _auto_spoiler_if_needed(self, text: str) -> str:
-        # If already has <details>, leave it
-        if "<details" in text.lower():
-            return text
-        # Heuristic: many models write analysis in English first, then the final answer in Russian.
-        m = CYR_RE.search(text)
-        if not m:
-            return text
-        cyr_idx = m.start()
-        # Choose split at the previous empty line before the first Cyrillic char
-        split = text.rfind("\n\n", 0, cyr_idx)
-        if split == -1:
-            split = text.rfind("\n", 0, cyr_idx)
-        head = text[:split].strip() if split != -1 else text[:cyr_idx].strip()
-        tail = text[split:].lstrip("\n") if split != -1 else text[cyr_idx:]
-        # Only wrap if head looks like analysis (long enough, multiple sentences)
-        if len(head) >= 80 and (head.count(".") + head.count("!") + head.count("?")) >= 2:
-            return self._wrap_think_block(head) + tail
-        return text
-
-    def _render_think_final(self, text: str) -> str:
-        mode = self._s.think_render_mode
-        if mode == "hide":
-            return THINK_RE.sub("", text)
-        if mode == "spoiler":
-            if THINK_RE.search(text):
-                return THINK_RE.sub(lambda m: self._wrap_think_block(m.group(1)), text)
-            # No tags -> try heuristic wrapping
-            return self._auto_spoiler_if_needed(text)
-        return text
-
-    def _strip_stream_delta(self, acc: str, delta: str) -> tuple[str, str]:
-        mode = self._s.think_render_mode
-        new_acc = acc + delta
-        if mode == "hide":
-            open_pos = new_acc.rfind("<think>")
-            close_pos = new_acc.rfind("</think>")
-            if open_pos != -1 and (close_pos == -1 or close_pos < open_pos):
-                visible = re.sub(r"<think>[\s\S]*$", "", new_acc, flags=re.IGNORECASE)
-                public_delta = visible[len(self._render_think_final(acc)):]  # incremental
-                return new_acc, public_delta
-            cleaned = THINK_RE.sub("", new_acc)
-            public_delta = cleaned[len(self._render_think_final(acc)):]  # diff
-            return new_acc, public_delta
-        elif mode == "spoiler":
-            rendered = self._render_think_final(new_acc)
-            prev_rendered = self._render_think_final(acc)
-            public_delta = rendered[len(prev_rendered):]
-            return new_acc, public_delta
-        else:
-            return new_acc, delta
 
     async def _maybe_store_memory(self, user_text: str) -> None:
         m = MEMORY_NAME_RE.search(user_text.strip())
@@ -197,11 +136,10 @@ class LocalResponsesService:
         async for delta in self._llm.chat_stream(messages):
             parts.append(delta)
         full_raw = "".join(parts).strip()
-        final_text = self._render_think_final(full_raw)
         prompt_tokens = estimate_messages_tokens(messages)
         completion_tokens = estimate_tokens(full_raw)
         usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
-        return final_text, usage
+        return full_raw, usage
 
     async def respond(self, *, thread_id: str | None, previous_response_id: str | None, user_text: str, store: bool) -> Tuple[str, str, str, Dict[str, int], str]:
         actual_thread_id = await self._db.resolve_thread(previous_response_id, thread_id)
@@ -241,17 +179,14 @@ class LocalResponsesService:
         response_id = str(uuid.uuid4())
         t0 = time.perf_counter()
         yield {"type": "start", "response_id": response_id, "thread_id": actual_thread_id}
-        raw_acc = ""; public_acc = ""
+        raw_acc = ""
         async for delta in self._llm.chat_stream(messages):
-            raw_acc, public_delta = self._strip_stream_delta(raw_acc, delta)
-            if public_delta:
-                public_acc += public_delta
-                yield {"type": "delta", "text": public_delta}
-        final_text = self._render_think_final(raw_acc)
+            raw_acc += delta
+            yield {"type": "delta", "text": delta}
         prompt_tokens = estimate_messages_tokens(messages)
         completion_tokens = estimate_tokens(raw_acc)
         usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
-        out_msg_id = await self._db.insert_message(actual_thread_id, "assistant", final_text)
+        out_msg_id = await self._db.insert_message(actual_thread_id, "assistant", raw_acc)
         await self._db.insert_response(actual_thread_id, user_msg_id, status="completed", usage=usage)
         dt_ms = int((time.perf_counter() - t0) * 1000)
         yield {"type": "end", "usage": usage}

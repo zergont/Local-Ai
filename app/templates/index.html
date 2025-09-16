@@ -29,6 +29,9 @@
     .kbd{font:12px/1 monospace;background:#0b0d12;border:1px solid #232836;border-radius:6px;padding:2px 6px}
     details{background:#0f141d;border:1px solid #232836;border-radius:8px;padding:6px 10px;margin-top:6px}
     details pre{white-space:pre-wrap;font:12px/1.4 monospace;margin:6px 0 0;padding:6px;background:#0b0f15;border:1px solid #232836;border-radius:6px;max-height:320px;overflow:auto}
+    details.think-spoiler[data-streaming="true"] summary::after{content:" (обновляется...)";color:var(--muted);font-size:11px}
+    details.think-spoiler summary{cursor:pointer;user-select:none}
+    details.think-spoiler summary:hover{color:var(--acc)}
     label.checkbox{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer}
     .composer{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid #232836;padding-top:12px}
   </style>
@@ -90,7 +93,16 @@ setThread(threadId);
 function addMsg(role, html){
   const div = document.createElement('div');
   div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
-  div.innerHTML = html;
+  
+  if (role === 'assistant') {
+    // Сохраняем оригинальный HTML и обрабатываем теги think
+    div.setAttribute('data-original', html);
+    const processedText = processThinkTags(html.replace(/<br>/g, '\n'));
+    div.innerHTML = processedText.replace(/\n/g, '<br>');
+  } else {
+    div.innerHTML = html;
+  }
+  
   elMsgs.appendChild(div);
   layout();
   keepScrolled();
@@ -98,8 +110,111 @@ function addMsg(role, html){
 
 function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
+// Функции для обработки тегов <think> на клиенте
+function wrapThinkSpoiler(inner, isStreaming = false, spoilerIndex = 0){
+  inner = inner.trim(); 
+  if(!inner) return '';
+  // Создаем стабильный ID на основе времени и индекса
+  const detailsId = `think-${Date.now()}-${spoilerIndex}`;
+  return `<details class="think-spoiler" ${isStreaming ? 'data-streaming="true"' : ''} id="${detailsId}"><summary>Рассуждения</summary>\n<pre data-content="${escapeHtml(inner)}">${escapeHtml(inner)}</pre></details>\n`;
+}
+
+function processThinkTags(text){
+  const showThink = elThink && elThink.checked;
+  if (!showThink) {
+    // Скрываем теги <think>
+    return text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  } else {
+    // Показываем в спойлерах с индексами
+    let spoilerIndex = 0;
+    return text.replace(/<think>([\s\S]*?)<\/think>/gi, (match, content) => {
+      return wrapThinkSpoiler(content, false, spoilerIndex++);
+    });
+  }
+}
+
+// Функция для обработки потокового текста с незавершенными тегами
+function processStreamingThink(rawText) {
+  const showThink = elThink && elThink.checked;
+  
+  // Проверяем, есть ли незавершенный тег <think>
+  const openPos = rawText.lastIndexOf('<think>');
+  const closePos = rawText.lastIndexOf('</think>');
+  
+  if (openPos !== -1 && (closePos === -1 || closePos < openPos)) {
+    // У нас есть незавершенный тег <think>
+    const beforeThink = rawText.substring(0, openPos);
+    const insideThink = rawText.substring(openPos + 7); // +7 для "<think>"
+    
+    if (!showThink) {
+      // Не показываем теги think, отображаем только текст до тега
+      return beforeThink;
+    } else {
+      // Считаем количество завершенных спойлеров для правильного индекса
+      const completedThinks = (beforeThink.match(/<\/think>/gi) || []).length;
+      // Показываем интерактивный спойлер с тем что есть пока
+      return processThinkTags(beforeThink) + wrapThinkSpoiler(insideThink, true, completedThinks);
+    }
+  } else {
+    // Все теги завершены, обрабатываем как обычно
+    return processThinkTags(rawText);
+  }
+}
+
+// Глобальная переменная для отслеживания состояния спойлеров
+let openedSpoilers = new Set();
+
+// Функция для сохранения состояния открытых спойлеров
+function saveOpenSpoilers(element) {
+  const spoilers = element.querySelectorAll('details.think-spoiler');
+  spoilers.forEach(spoiler => {
+    if (spoiler.open && spoiler.id) {
+      openedSpoilers.add(spoiler.id);
+    } else if (!spoiler.open && spoiler.id) {
+      openedSpoilers.delete(spoiler.id);
+    }
+  });
+}
+
+// Функция для восстановления состояния открытых спойлеров
+function restoreOpenSpoilers(element) {
+  const spoilers = element.querySelectorAll('details.think-spoiler');
+  spoilers.forEach(spoiler => {
+    if (spoiler.id && openedSpoilers.has(spoiler.id)) {
+      spoiler.open = true;
+    }
+  });
+}
+
+// Упрощенная функция для обновления сообщения с сохранением состояния спойлеров
+function updateMessageWithSpoilerState(element, rawText) {
+  // Сохраняем состояние спойлеров
+  saveOpenSpoilers(element);
+  
+  // Обновляем содержимое
+  const processedText = processStreamingThink(rawText);
+  element.innerHTML = processedText.replace(/\n/g, '<br>');
+  
+  // Восстанавливаем состояние спойлеров
+  restoreOpenSpoilers(element);
+  
+  // Добавляем обработчики для отслеживания изменений состояния
+  const spoilers = element.querySelectorAll('details.think-spoiler');
+  spoilers.forEach(spoiler => {
+    spoiler.addEventListener('toggle', () => {
+      if (spoiler.id) {
+        if (spoiler.open) {
+          openedSpoilers.add(spoiler.id);
+        } else {
+          openedSpoilers.delete(spoiler.id);
+        }
+      }
+    });
+  });
+}
+
 async function loadConfig(){
-  try{ const res = await fetch(api('/config')); const cfg = await res.json(); CFG = cfg; applyThinkPref(cfg); }catch{}
+  try{ const res = await fetch(api('/config')); const cfg = await res.json(); CFG = cfg; }catch{}
 }
 
 function budgetStr(){
@@ -107,55 +222,20 @@ function budgetStr(){
   return b ? ` | budget≈ ${b}` : '';
 }
 
-function applyThinkPref(cfg){
-  const saved = localStorage.getItem('think_mode');
-  if(saved){ elThink.checked = (saved === 'spoiler'); }
-  else { elThink.checked = (cfg.THINK_RENDER_MODE === 'spoiler'); }
-}
-
-async function setThinkMode(mode){
-  try{ await fetch(api('/config/think-mode'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode}) }); }
-  catch{}
-}
-
 elThink.addEventListener('change', ()=>{
-  const mode = elThink.checked ? 'spoiler' : 'hide';
+  const mode = elThink.checked ? 'show' : 'hide';
   localStorage.setItem('think_mode', mode);
-  setThinkMode(mode);
-  addMsg('assistant', '<em>Режим рассуждений: ' + (elThink.checked ? 'показ (спойлер)' : 'скрыто') + '</em>');
-});
-
-function wrapThinkSpoiler(inner){
-  inner = inner.trim(); if(!inner) return '';
-  return '<details><summary>Рассуждения</summary>\n<pre>'+escapeHtml(inner)+'</pre></details>\n';
-}
-
-function autoSpoiler(text){
-  if(/<details/i.test(text)) return text; // already wrapped
-  const m = /[\u0400-\u052F]/.exec(text); // first Cyrillic
-  if(!m) return text;
-  const cyrIdx = m.index;
-  let split = text.lastIndexOf('\n\n', cyrIdx);
-  if(split === -1) split = text.lastIndexOf('\n', cyrIdx);
-  const head = (split !== -1 ? text.slice(0, split) : text.slice(0, cyrIdx)).trim();
-  const tail = (split !== -1 ? text.slice(split) : text.slice(cyrIdx)).replace(/^\n+/, '');
-  if(head.length >= 80 && /[.!?]/.test(head)){
-    return wrapThinkSpoiler(head) + tail;
-  }
-  return text;
-}
-
-function transformThink(text){
-  const mode = elThink.checked ? 'spoiler' : 'hide';
-  if(mode === 'hide'){
-    return text.replace(/<think>[\s\S]*?<\/think>/gi,'');
-  }else{
-    if(/<think>/i.test(text)){
-      return text.replace(/<think>[\s\S]*?<\/think>/gi,(m)=>wrapThinkSpoiler(m.replace(/<\/?think>/gi,'').trim()));
+  
+  // Перерендерим все сообщения ассистента с новым режимом
+  const assistantMsgs = document.querySelectorAll('.msg.a');
+  assistantMsgs.forEach(msgEl => {
+    const originalHtml = msgEl.getAttribute('data-original');
+    if (originalHtml) {
+      const processedText = processThinkTags(originalHtml.replace(/<br>/g, '\n'));
+      msgEl.innerHTML = processedText.replace(/\n/g, '<br>');
     }
-    return autoSpoiler(text);
-  }
-}
+  });
+});
 
 async function uploadFile(file){
   const fd = new FormData(); fd.append('file', file);
@@ -184,10 +264,38 @@ async function sendWS(){
       if(!threadId && msg.thread_id) setThread(msg.thread_id);
     }else if(msg.type==='delta'){
       accRaw += msg.text;
-      const rendered = transformThink(accRaw).replace(/\n/g,'<br>');
-      if(!firstAssistShown){ addMsg('assistant', rendered); firstAssistShown=true; }
-      else { elMsgs.lastChild.innerHTML = rendered; keepScrolled(); }
+      
+      if(!firstAssistShown){ 
+        // Создаем первое сообщение
+        const div = document.createElement('div');
+        div.className = 'msg a';
+        div.setAttribute('data-original', accRaw.replace(/\n/g,'<br>'));
+        
+        updateMessageWithSpoilerState(div, accRaw);
+        
+        elMsgs.appendChild(div);
+        layout();
+        keepScrolled();
+        firstAssistShown=true; 
+      } else { 
+        // Обновляем существующее сообщение с сохранением состояния спойлеров
+        const lastMsg = elMsgs.lastChild;
+        lastMsg.setAttribute('data-original', accRaw.replace(/\n/g,'<br>'));
+        
+        updateMessageWithSpoilerState(lastMsg, accRaw);
+        
+        keepScrolled(); 
+      }
     }else if(msg.type==='end'){
+      // Убираем атрибут streaming у всех спойлеров в последнем сообщении
+      const lastMsg = elMsgs.lastChild;
+      if (lastMsg) {
+        const streamingSpoilers = lastMsg.querySelectorAll('details.think-spoiler[data-streaming="true"]');
+        streamingSpoilers.forEach(spoiler => {
+          spoiler.removeAttribute('data-streaming');
+        });
+      }
+      
       const budget = budgetStr();
       elStatus.textContent = (msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
       ws.close();
@@ -208,9 +316,9 @@ async function sendPOST(){
     const res = await fetch(api('/responses'), { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
     const j = await res.json(); if(!res.ok) throw new Error((j && j.detail) || 'error');
     if(!threadId && j.thread_id) setThread(j.thread_id);
-    const rendered = transformThink(j.output_text || '(пусто)').replace(/\n/g,'<br>');
+    const responseText = j.output_text || '(пусто)';
+    addMsg('assistant', responseText.replace(/\n/g,'<br>'));
     const budget = budgetStr();
-    addMsg('assistant', rendered);
     elStatus.textContent = (j.usage ? `tokens≈ ${j.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
   }catch(err){
     addMsg('assistant','⚠️ Ошибка: '+err.message);
@@ -231,7 +339,20 @@ function layout(){
   elMsgs.style.paddingBottom = '0px';
 }
 
-document.addEventListener('DOMContentLoaded', ()=>{ layout(); keepScrolled(); });
+// Инициализация состояния чекбокса из localStorage
+document.addEventListener('DOMContentLoaded', ()=>{ 
+  layout(); 
+  keepScrolled(); 
+  
+  // Восстанавливаем состояние чекбокса
+  const saved = localStorage.getItem('think_mode');
+  if(saved){ 
+    elThink.checked = (saved === 'show'); 
+  } else { 
+    elThink.checked = false; // По умолчанию скрыто
+  }
+});
+
 window.addEventListener('resize', layout);
 new ResizeObserver(layout).observe(document.querySelector('.composer'));
 

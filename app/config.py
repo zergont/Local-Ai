@@ -84,9 +84,6 @@ class Settings(BaseSettings):
     # Hysteresis gap before triggering folding summarization
     context_hysteresis_tokens: int = Field(default=1024, ge=0)
 
-    # Think tag rendering mode: hide | spoiler
-    think_render_mode: str = Field(default="hide")
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="LOCALAPI_",
@@ -104,14 +101,6 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return [str(p).lower() if str(p).startswith(".") else f".{str(p).lower()}" for p in v]
         return v
-
-    @field_validator("think_render_mode", mode="before")
-    @classmethod
-    def _validate_think_mode(cls, v: object) -> str:
-        if not v:
-            return "hide"
-        val = str(v).lower().strip()
-        return val if val in {"hide", "spoiler"} else "hide"
 
     @field_validator("app_base_url", mode="before")
     @classmethod

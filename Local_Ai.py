@@ -19,12 +19,6 @@ Curl sanity test:
 from __future__ import annotations
 
 from app.api import app
-from app.ui import router as ui_router
-from app.ws import router as ws_router
-
-# include UI and WS routers for local chat interface
-app.include_router(ui_router)
-app.include_router(ws_router)
 
 __all__ = ["app"]
 
