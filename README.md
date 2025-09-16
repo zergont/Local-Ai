@@ -30,6 +30,7 @@ Copy `.env.example` to `.env` and adjust values.
 | Max upload MB | LOCALAPI_MAX_UPLOAD_MB | 25 |
 | Allowed extensions | LOCALAPI_ALLOWED_EXTS | .png,.jpg,.jpeg,.webp,.gif,.pdf,.txt |
 | Base public URL (absolute links) | LOCALAPI_APP_BASE_URL | http://127.0.0.1:8080 |
+| Tools mode | LOCALAPI_TOOLS_MODE | off |
 
 Budget logic: prompt portion = CONTEXT_WINDOW_TOKENS * CONTEXT_PROMPT_BUDGET_RATIO. Если текущая сборка контекста превышает budget + hysteresis → тихая "свёртка" (fold) истории в summary. Если после свёртки всё ещё > budget — уменьшаются последние сообщения (уменьшение K с коэффициентом 0.7).
 
@@ -39,15 +40,16 @@ Budget logic: prompt portion = CONTEXT_WINDOW_TOKENS * CONTEXT_PROMPT_BUDGET_RAT
 - `GET /threads/{thread_id}/messages?limit=50` -> last messages (chronological)
 - `GET /threads/{thread_id}/summary` -> current summary
 - `POST /threads/{thread_id}/summarize` -> force summarization
-- `GET /file/{id}` -> serve local file from ./files/{id}
+- `GET /file/{id}` -> serve local file from configured files_dir
 - `GET /config` -> runtime non-secret config (includes upload + context settings)
+- `GET /health` -> { db, llm_online, model }
 - UI: `GET /` (chat), `POST /ui/upload` (file upload)
 - WS streaming: `/ws/respond` (deltas: start, delta, end). Final log line: `{"phase":"final","model":"<model>","stream":true,"thread_id":"..."}`
 
 ## Files & media
-- Upload endpoint: `/ui/upload` checks size, extension whitelist, mime, stores files as `<sha256><suffix>` in `./files`. Duplicate content deduplicated.
-- Returned JSON contains absolute URL: `${APP_BASE_URL}/file/<sha256><suffix>`.
-- `/file/{sha.ext}` only serves files within the `files` directory (path traversal blocked).
+- Upload endpoint: `/ui/upload` checks size, extension whitelist, mime, stores files as `<sha256><suffix>` in configured `files_dir`. Duplicate content deduplicated.
+- Returned JSON contains absolute URL derived from request.base_url (fallback to APP_BASE_URL): `${BASE}/file/<sha256><suffix>`.
+- `/file/{sha.ext}` only serves files within the files directory (path traversal blocked).
 
 ## Streaming model call
 Один вызов `/v1/chat/completions` со `stream=true`. SSE чанки проксируются. REST вариант собирает результат.
@@ -60,10 +62,10 @@ Budget logic: prompt portion = CONTEXT_WINDOW_TOKENS * CONTEXT_PROMPT_BUDGET_RAT
 Результат сохраняется в `summaries` и добавляется как system message.
 
 ## User memory (profiles)
-Фраза вида «запомни, что меня зовут Алекс» сохраняет `user.name=Алекс` в таблицу `profiles`. При сборке контекста добавляется system строка: `Факты о пользователе: имя = Алекс.`
+Фраза вида «запомни, что меня зовут Алекс» сохраняет `user.name=Алекс` в таблицу `profiles` (уникальность имени обеспечена). При сборке контекста добавляется system строка: `Факты о пользователе: имя = Алекс.`
 
 ## Tool (vision demo)
-Инструмент `vision_describe` (multimodal). Для изображения используйте абсолютный URL из аплоада.
+Инструмент `vision_describe` (multimodal). Планируется вариант passthrough в LM Studio; локальная интеграция выключена по умолчанию (`LOCALAPI_TOOLS_MODE=off`).
 
 ## File uploads example
 ```bash

@@ -40,9 +40,10 @@ CREATE TABLE IF NOT EXISTS summaries (
     FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
 );
 
+-- Ensure unique key for profiles.name for proper upsert logic
 CREATE TABLE IF NOT EXISTS profiles (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
     settings_json TEXT NOT NULL,
     created_at REAL NOT NULL
 );

@@ -16,6 +16,7 @@ for upload settings to match UI requirements.
 - LOCALAPI_REQUEST_TIMEOUT (seconds, default: 120)
 - LOCALAPI_LOG_LEVEL (default: INFO)
 - LOCALAPI_FILES_DIR (default: files)
+- LOCALAPI_TOOLS_MODE (default: off) -> one of: off, passthrough
 
 Upload-related (also accepts LOCALAI_* overrides):
 - LOCALAPI_MAX_UPLOAD_MB (default: 25)
@@ -64,6 +65,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     files_dir: str = Field(default="files")
 
+    # Tools handling mode: off | passthrough (forward OpenAI tools to backend)
+    tools_mode: str = Field(default="off")
+
     # Upload settings (can be overridden by LOCALAI_* env vars)
     max_upload_mb: int = Field(default=25, ge=1)
     allowed_exts: List[str] = Field(default_factory=lambda: [
@@ -109,6 +113,12 @@ class Settings(BaseSettings):
             return "http://127.0.0.1:8080"
         s = str(v).strip().rstrip('/')
         return s
+
+    @field_validator("tools_mode", mode="before")
+    @classmethod
+    def _norm_tools_mode(cls, v: object) -> str:
+        s = str(v or "off").strip().lower()
+        return s if s in {"off", "passthrough"} else "off"
 
 
 @lru_cache(maxsize=1)

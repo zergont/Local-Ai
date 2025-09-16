@@ -61,6 +61,8 @@ class LLMClient:
         payload: Dict[str, Any] = {
             "model": self._model,
             "messages": messages,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
             "stream": True,
         }
         async with self._client.stream("POST", url, json=payload) as r:

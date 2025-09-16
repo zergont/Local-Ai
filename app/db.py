@@ -235,16 +235,15 @@ class Database:
         """Store single key/value in profiles (name unique)."""
         assert self._db is not None
         now = time.time()
-        row = await self.fetch_one("SELECT id FROM profiles WHERE name=?", [key])
         payload = json.dumps({"value": value}, ensure_ascii=False)
-        if row:
-            await self.execute("UPDATE profiles SET settings_json=?, created_at=? WHERE name=?", [payload, now, key])
-        else:
-            pid = str(uuid.uuid4())
-            await self.execute(
-                "INSERT INTO profiles(id, name, settings_json, created_at) VALUES (?,?,?,?)",
-                [pid, key, payload, now],
-            )
+        # Use UPSERT on name unique constraint
+        await self.execute(
+            (
+                "INSERT INTO profiles(id, name, settings_json, created_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET settings_json=excluded.settings_json, created_at=excluded.created_at"
+            ),
+            [str(uuid.uuid4()), key, payload, now],
+        )
         log_info("profile_upsert", key=key, value=value)
 
     async def get_profile_value(self, key: str) -> Optional[str]:

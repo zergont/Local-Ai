@@ -131,6 +131,21 @@ def create_app() -> FastAPI:
         log_info("shutdown", message="Service stopped")
         print_banner("Local AI — сервер остановлен", [])
 
+    @app.get("/health")
+    async def get_health() -> dict[str, Any]:
+        ok_db = True
+        try:
+            # trivial query to ensure DB connection alive
+            await db.fetch_one("SELECT 1 AS ok", [])
+        except Exception as e:  # noqa: BLE001
+            ok_db = False
+            log_error("health_db_error", error=str(e))
+        return {
+            "db": ok_db,
+            "llm_online": bool(app.state.llm_online),
+            "model": settings.llm_model,
+        }
+
     @app.get("/config")
     async def get_config() -> dict[str, Any]:
         s = get_settings()
@@ -198,7 +213,8 @@ def create_app() -> FastAPI:
 
     @app.get("/file/{file_id}")
     async def get_file(file_id: str) -> FileResponse:
-        base = Path("files").resolve()
+        # Use configured files_dir for consistency with uploader
+        base = Path(get_settings().files_dir).resolve()
         path = (base / file_id).resolve()
         if not path.is_file() or base not in path.parents:
             raise HTTPException(status_code=404, detail="not found")

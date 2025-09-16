@@ -30,4 +30,7 @@ async def ws_respond(ws: WebSocket) -> None:
         trace_id = str(uuid.uuid4())
         await ws.send_text(json.dumps({"type": "error", "message": "internal error", "trace_id": trace_id}, ensure_ascii=False))
     finally:
-        await ws.close()
+        try:
+            await ws.close()
+        except Exception:
+            pass

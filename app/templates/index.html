@@ -34,6 +34,10 @@
     details.think-spoiler summary:hover{color:var(--acc)}
     label.checkbox{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer}
     .composer{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid #232836;padding-top:12px}
+    /* LLM status dot */
+    .dot{width:10px;height:10px;border-radius:50%;display:inline-block;border:1px solid #2a2f3a}
+    .dot.ok{background:#28c76f;border-color:#1e4b34}
+    .dot.bad{background:#ff4d4f;border-color:#5a1f22}
   </style>
 </head>
 <body>
@@ -43,6 +47,7 @@
     <span class="pill" id="thread-pill"></span>
     <span class="pill">Ctrl/⌘+Enter — отправить</span>
     <label class="checkbox"><input type="checkbox" id="toggle-think"/> Показывать рассуждения</label>
+    <span class="pill">LLM: <span id="llm-dot" class="dot bad" title="Соединение с LLM"></span></span>
   </div>
 </header>
 <main class="wrap">
@@ -76,6 +81,7 @@ const elNew = document.getElementById('new');
 const elStatus = document.getElementById('status');
 const elPill = document.getElementById('thread-pill');
 const elThink = document.getElementById('toggle-think');
+const elLlmDot = document.getElementById('llm-dot');
 
 let autoScroll = true;
 function scrollToBottom(){ elMsgs.scrollTo({ top: elMsgs.scrollHeight, behavior: 'auto' }); }
@@ -95,12 +101,12 @@ function addMsg(role, html){
   div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
   
   if (role === 'assistant') {
-    // Сохраняем оригинальный HTML и обрабатываем теги think
+    // Сохраняем оригинальный HTML и обрабатываем теги think с безопасным экранированием
     div.setAttribute('data-original', html);
-    const processedText = processThinkTags(html.replace(/<br>/g, '\n'));
+    const processedText = processThinkTags((html || '').replace(/<br>/g, '\n'));
     div.innerHTML = processedText.replace(/\n/g, '<br>');
   } else {
-    div.innerHTML = html;
+    div.textContent = html;
   }
   
   elMsgs.appendChild(div);
@@ -108,11 +114,11 @@ function addMsg(role, html){
   keepScrolled();
 }
 
-function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 
-// Функции для обработки тегов <think> на клиенте
+// Функции для обработки тегов <think> на клиенте с безопасным экранированием
 function wrapThinkSpoiler(inner, isStreaming = false, spoilerIndex = 0){
-  inner = inner.trim(); 
+  inner = String(inner).trim(); 
   if(!inner) return '';
   // Создаем стабильный ID на основе времени и индекса
   const detailsId = `think-${Date.now()}-${spoilerIndex}`;
@@ -121,34 +127,43 @@ function wrapThinkSpoiler(inner, isStreaming = false, spoilerIndex = 0){
 
 function processThinkTags(text){
   const showThink = elThink && elThink.checked;
-  if (!showThink) {
-    // Скрываем теги <think>
-    return text.replace(/<think>[\s\S]*?<\/think>/gi, '');
-  } else {
-    // Показываем в спойлерах с индексами
-    let spoilerIndex = 0;
-    return text.replace(/<think>([\s\S]*?)<\/think>/gi, (match, content) => {
-      return wrapThinkSpoiler(content, false, spoilerIndex++);
-    });
+  const src = String(text || '');
+  let out = '';
+  let last = 0;
+  const re = /<think>([\s\S]*?)<\/think>/gi;
+  let m; let idx = 0;
+  while((m = re.exec(src)) !== null){
+    const before = src.slice(last, m.index);
+    // Экранируем обычный текст
+    out += escapeHtml(before);
+    // Добавляем спойлер или скрываем содержимое <think>
+    if (showThink) {
+      out += wrapThinkSpoiler(m[1], false, idx++);
+    }
+    last = re.lastIndex;
   }
+  const tail = src.slice(last);
+  out += escapeHtml(tail);
+  return out;
 }
 
 // Функция для обработки потокового текста с незавершенными тегами
 function processStreamingThink(rawText) {
   const showThink = elThink && elThink.checked;
+  const src = String(rawText || '');
   
   // Проверяем, есть ли незавершенный тег <think>
-  const openPos = rawText.lastIndexOf('<think>');
-  const closePos = rawText.lastIndexOf('</think>');
+  const openPos = src.lastIndexOf('<think>');
+  const closePos = src.lastIndexOf('</think>');
   
   if (openPos !== -1 && (closePos === -1 || closePos < openPos)) {
     // У нас есть незавершенный тег <think>
-    const beforeThink = rawText.substring(0, openPos);
-    const insideThink = rawText.substring(openPos + 7); // +7 для "<think>"
+    const beforeThink = src.substring(0, openPos);
+    const insideThink = src.substring(openPos + 7); // +7 для "<think>"
     
     if (!showThink) {
-      // Не показываем теги think, отображаем только текст до тега
-      return beforeThink;
+      // Не показываем теги think, отображаем только безопасный текст до тега
+      return escapeHtml(beforeThink);
     } else {
       // Считаем количество завершенных спойлеров для правильного индекса
       const completedThinks = (beforeThink.match(/<\/think>/gi) || []).length;
@@ -157,7 +172,7 @@ function processStreamingThink(rawText) {
     }
   } else {
     // Все теги завершены, обрабатываем как обычно
-    return processThinkTags(rawText);
+    return processThinkTags(src);
   }
 }
 
@@ -191,7 +206,7 @@ function updateMessageWithSpoilerState(element, rawText) {
   // Сохраняем состояние спойлеров
   saveOpenSpoilers(element);
   
-  // Обновляем содержимое
+  // Обновляем содержимое (безопасный рендер)
   const processedText = processStreamingThink(rawText);
   element.innerHTML = processedText.replace(/\n/g, '<br>');
   
@@ -214,7 +229,22 @@ function updateMessageWithSpoilerState(element, rawText) {
 }
 
 async function loadConfig(){
-  try{ const res = await fetch(api('/config')); const cfg = await res.json(); CFG = cfg; }catch{}
+  try{ const res = await fetch(api('/config')); const cfg = await res.json(); CFG = cfg; setLlmDot(!!cfg.LLM_ONLINE); }catch{ setLlmDot(false); }
+}
+
+function setLlmDot(ok){
+  if(!elLlmDot) return;
+  elLlmDot.classList.remove('ok','bad');
+  elLlmDot.classList.add(ok ? 'ok' : 'bad');
+}
+
+async function pollHealth(){
+  try{
+    const r = await fetch(api('/health'));
+    if(!r.ok) throw new Error('bad');
+    const j = await r.json();
+    setLlmDot(!!j.llm_online);
+  }catch{ setLlmDot(false); }
 }
 
 function budgetStr(){
@@ -253,7 +283,7 @@ elFile.addEventListener('change', async (e)=>{
 
 async function sendWS(){
   const text = elInput.value.trim(); if(!text) return;
-  addMsg('user', escapeHtml(text).replace(/\n/g,'<br>'));
+  addMsg('user', text);
   elInput.value=''; elStatus.textContent='Стрим…';
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/respond');
   ws.onopen = () => { const payload = { input_text: text, store: true }; if(threadId) payload.thread_id = threadId; ws.send(JSON.stringify(payload)); };
@@ -309,7 +339,7 @@ async function sendWS(){
 
 async function sendPOST(){
   const text = elInput.value.trim(); if(!text) return;
-  addMsg('user', escapeHtml(text).replace(/\n/g,'<br>'));
+  addMsg('user', text);
   elInput.value=''; elStatus.textContent='Думаю…';
   const payload = { input_text: text, store: true }; if(threadId) payload.thread_id = threadId;
   try{
@@ -317,7 +347,7 @@ async function sendPOST(){
     const j = await res.json(); if(!res.ok) throw new Error((j && j.detail) || 'error');
     if(!threadId && j.thread_id) setThread(j.thread_id);
     const responseText = j.output_text || '(пусто)';
-    addMsg('assistant', responseText.replace(/\n/g,'<br>'));
+    addMsg('assistant', responseText);
     const budget = budgetStr();
     elStatus.textContent = (j.usage ? `tokens≈ ${j.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
   }catch(err){
@@ -351,6 +381,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
   } else { 
     elThink.checked = false; // По умолчанию скрыто
   }
+  loadConfig();
+  pollHealth();
+  setInterval(pollHealth, 5000);
 });
 
 window.addEventListener('resize', layout);
@@ -360,7 +393,6 @@ elSend.addEventListener('click', send);
 elInput.addEventListener('keydown', (e)=>{ if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ send(); } });
 elNew.addEventListener('click', ()=>{ setThread(null); addMsg('assistant','— Новый диалог —'); });
 
-loadConfig();
 </script>
 </body>
 </html>

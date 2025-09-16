@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 import secrets
@@ -22,7 +22,7 @@ def _is_allowed_mime(mime: str) -> bool:
 
 
 @router.post("/ui/upload")
-async def ui_upload(file: UploadFile = File(...)):
+async def ui_upload(file: UploadFile = File(...), request: Request = None):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in settings.allowed_exts:
         raise HTTPException(400, f"unsupported file type: {suffix}")
@@ -61,7 +61,12 @@ async def ui_upload(file: UploadFile = File(...)):
             tmp.replace(final_path)
             exists = False
         log_info("ui_upload", size=size, mime=file.content_type, name=final_path.name, status="ok", dedup=exists)
-        abs_url = f"{settings.app_base_url}/file/{final_path.name}"
+        # Prefer request.base_url to generate URL behind reverse proxies; fallback to settings.app_base_url
+        try:
+            base_url = str(request.base_url).rstrip("/") if request is not None else settings.app_base_url
+        except Exception:
+            base_url = settings.app_base_url
+        abs_url = f"{base_url}/file/{final_path.name}"
         return {"url": abs_url, "size": size}
     except HTTPException:
         raise
