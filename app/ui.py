@@ -2,7 +2,6 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 from pathlib import Path
 import secrets
-import shutil
 import hashlib
 
 from .logging_utils import log_error, log_info
@@ -62,7 +61,8 @@ async def ui_upload(file: UploadFile = File(...)):
             tmp.replace(final_path)
             exists = False
         log_info("ui_upload", size=size, mime=file.content_type, name=final_path.name, status="ok", dedup=exists)
-        return {"url": f"/file/{final_path.name}", "size": size}
+        abs_url = f"{settings.app_base_url}/file/{final_path.name}"
+        return {"url": abs_url, "size": size}
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001

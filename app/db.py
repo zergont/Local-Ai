@@ -5,9 +5,7 @@ Schema:
 - messages(id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, content TEXT, created_at REAL,
            token_count INTEGER DEFAULT 0)
 - summaries(thread_id TEXT PRIMARY KEY, content TEXT, created_at REAL)
-
-Notes:
-- DB uses WAL mode for concurrency.
+- profiles(id TEXT PRIMARY KEY, name TEXT UNIQUE, settings_json TEXT, created_at REAL)
 """
 from __future__ import annotations
 
@@ -230,3 +228,34 @@ class Database:
             "output_text": str(row.get("output_text", "")),
             "usage": usage,
         }
+
+    # --------------- profiles (memory) ---------------
+
+    async def upsert_profile_kv(self, key: str, value: str) -> None:
+        """Store single key/value in profiles (name unique)."""
+        assert self._db is not None
+        now = time.time()
+        row = await self.fetch_one("SELECT id FROM profiles WHERE name=?", [key])
+        payload = json.dumps({"value": value}, ensure_ascii=False)
+        if row:
+            await self.execute("UPDATE profiles SET settings_json=?, created_at=? WHERE name=?", [payload, now, key])
+        else:
+            pid = str(uuid.uuid4())
+            await self.execute(
+                "INSERT INTO profiles(id, name, settings_json, created_at) VALUES (?,?,?,?)",
+                [pid, key, payload, now],
+            )
+        log_info("profile_upsert", key=key, value=value)
+
+    async def get_profile_value(self, key: str) -> Optional[str]:
+        row = await self.fetch_one("SELECT settings_json FROM profiles WHERE name=?", [key])
+        if not row:
+            return None
+        try:
+            data = json.loads(row["settings_json"]) if row["settings_json"] else {}
+            v = data.get("value")
+            if v is None:
+                return None
+            return str(v)
+        except Exception:
+            return None

@@ -1,6 +1,6 @@
 # Local Responses API
 
-Minimal FastAPI app with JSON logging and SQLite init.
+Minimal FastAPI app with JSON logging, SQLite init, streaming LLM proxy and optional vision tool.
 
 ## Requirements
 - Python 3.13
@@ -17,73 +17,61 @@ uvicorn Local_Ai:app --host 127.0.0.1 --port 8080
 ## Environment
 Copy `.env.example` to `.env` and adjust values.
 
+### Key env vars
+| Purpose | Var | Default |
+|---------|-----|---------|
+| Chat model | LOCALAPI_LLM_MODEL | qwen/qwen3-14b |
+| Vision model | LOCALAPI_VISION_MODEL | qwen2.5-vl-7b-instruct@q8_0 |
+| Context messages (max recent) | LOCALAPI_MAX_CONTEXT_MESSAGES | 12 |
+| Auto summarization trigger | LOCALAPI_SUMMARIZE_AFTER_MESSAGES | 16 |
+| Token window (model) | LOCALAPI_CONTEXT_WINDOW_TOKENS | 32768 |
+| Prompt budget ratio | LOCALAPI_CONTEXT_PROMPT_BUDGET_RATIO | 0.6 |
+| Hysteresis tokens | LOCALAPI_CONTEXT_HYSTERESIS_TOKENS | 1024 |
+| Max upload MB | LOCALAPI_MAX_UPLOAD_MB | 25 |
+| Allowed extensions | LOCALAPI_ALLOWED_EXTS | .png,.jpg,.jpeg,.webp,.gif,.pdf,.txt |
+| Base public URL (absolute links) | LOCALAPI_APP_BASE_URL | http://127.0.0.1:8080 |
+
+Budget logic: prompt portion = CONTEXT_WINDOW_TOKENS * CONTEXT_PROMPT_BUDGET_RATIO. Если текущая сборка контекста превышает budget + hysteresis → тихая "свёртка" (fold) истории в summary. Если после свёртки всё ещё > budget — уменьшаются последние сообщения (уменьшение K с коэффициентом 0.7).
+
 ## Endpoints
-- `POST /responses` -> create response from input_text (+ tool calling)
+- `POST /responses` -> create response from input_text (single streaming call collected server-side)
 - `GET /responses/{response_id}` -> response record with output_text, thread_id, usage
 - `GET /threads/{thread_id}/messages?limit=50` -> last messages (chronological)
 - `GET /threads/{thread_id}/summary` -> current summary
 - `POST /threads/{thread_id}/summarize` -> force summarization
 - `GET /file/{id}` -> serve local file from ./files/{id}
-- `GET /config` -> runtime non-secret config (includes upload limits)
+- `GET /config` -> runtime non-secret config (includes upload + context settings)
 - UI: `GET /` (chat), `POST /ui/upload` (file upload)
+- WS streaming: `/ws/respond` (deltas: start, delta, end). Final log line: `{"phase":"final","model":"<model>","stream":true,"thread_id":"..."}`
 
-## Tool calling demo (vision)
-1) Put a file into `./files`, e.g. `./files/cat.jpg`
-2) Prompt so controller calls vision_describe. Examples:
+## Files & media
+- Upload endpoint: `/ui/upload` checks size, extension whitelist, mime, stores files as `<sha256><suffix>` in `./files`. Duplicate content deduplicated.
+- Returned JSON contains absolute URL: `${APP_BASE_URL}/file/<sha256><suffix>`.
+- `/file/{sha.ext}` only serves files within the `files` directory (path traversal blocked).
 
-Windows PowerShell:
-```powershell
-$body = '{
-  "input_text": "Опиши картинку: /file/cat.jpg",
-  "store": true
-}'
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/responses -ContentType 'application/json' -Body $body
+## Streaming model call
+Один вызов `/v1/chat/completions` со `stream=true`. SSE чанки проксируются. REST вариант собирает результат.
+
+## Silent history folding (summary)
+При переполнении бюджета скрытый запрос:
 ```
-
-Linux/macOS bash:
-```bash
-curl -s -X POST http://127.0.0.1:8080/responses \
-  -H 'Content-Type: application/json' \
-  -d '{"input_text":"Опиши картинку: /file/cat.jpg", "store": true}' | jq .
+Сожми историю диалога в краткий конспект. Сохрани имена, предпочтения, задачи, факты и ссылки. Будь кратким и точным.
 ```
+Результат сохраняется в `summaries` и добавляется как system message.
 
-Direct LM Studio call (vision):
+## User memory (profiles)
+Фраза вида «запомни, что меня зовут Алекс» сохраняет `user.name=Алекс` в таблицу `profiles`. При сборке контекста добавляется system строка: `Факты о пользователе: имя = Алекс.`
+
+## Tool (vision demo)
+Инструмент `vision_describe` (multimodal). Для изображения используйте абсолютный URL из аплоада.
+
+## File uploads example
 ```bash
-export LM_BASE_URL=http://127.0.0.1:1234/v1
-curl -s -X POST "$LM_BASE_URL/chat/completions" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen2.5-vl-7b-instruct@q8_0",
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {"type": "text", "text": "Describe the image."},
-          {"type": "image_url", "image_url": {"url": "http://127.0.0.1:8080/file/cat.jpg"}}
-        ]
-      }
-    ],
-    "stream": false
-  }' | jq .
-```
-
-## File uploads
-- Configurable limits via env: `LOCALAPI_MAX_UPLOAD_MB` and `LOCALAPI_ALLOWED_EXTS` (CSV). UI-friendly overrides: `LOCALAI_MAX_UPLOAD_MB`, `LOCALAI_ALLOWED_EXTS`.
-- Files are stored under `./files` named as `<sha256><original_suffix>`. Duplicate content is deduplicated by hash.
-
-Examples:
-```bash
-# success
 curl -F "file=@tests/cat.jpg" http://127.0.0.1:8080/ui/upload
-
-# too large -> 413
-curl -i -F "file=@big.bin" http://127.0.0.1:8080/ui/upload
-
-# wrong type -> 400
-curl -i -F "file=@malware.exe" http://127.0.0.1:8080/ui/upload
+# -> {"url":"http://127.0.0.1:8080/file/<sha>.jpg","size":12345}
 ```
 
 ## Notes
-- On startup, app applies `schema.sql` to SQLite DB at the path from env (default `data/local_api.db`).
-- Logs are JSON to stdout via stdlib logging + json formatter.
-- Vision tool uses LM Studio model qwen2.5-vl-7b-instruct@q8_0 (multimodal).
+- On startup: applies `schema.sql`.
+- JSON logs to stdout.
+- Vision tool uses LM Studio `qwen2.5-vl-7b-instruct@q8_0`.

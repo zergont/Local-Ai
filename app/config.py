@@ -22,6 +22,11 @@ Upload-related (also accepts LOCALAI_* overrides):
 - LOCALAPI_ALLOWED_EXTS (CSV, default: .png,.jpg,.jpeg,.webp,.gif,.pdf,.txt)
 - LOCALAI_MAX_UPLOAD_MB (override)
 - LOCALAI_ALLOWED_EXTS (override)
+
+New context budget settings:
+- LOCALAPI_CONTEXT_WINDOW_TOKENS (default: 32768)
+- LOCALAPI_CONTEXT_PROMPT_BUDGET_RATIO (default: 0.6)
+- LOCALAPI_CONTEXT_HYSTERESIS_TOKENS (default: 1024)
 """
 from __future__ import annotations
 
@@ -38,6 +43,9 @@ class Settings(BaseSettings):
 
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8080)
+
+    # Base public URL for generating absolute links (no trailing slash)
+    app_base_url: str = Field(default="http://127.0.0.1:8080")
 
     database_path: str = Field(default="data/local_api.db")
 
@@ -68,6 +76,17 @@ class Settings(BaseSettings):
         ".txt",
     ])
 
+    # ---- Context window budgeting ----
+    # Maximum model context window (tokens)
+    context_window_tokens: int = Field(default=32768, ge=1024)
+    # Fraction of full window reserved for prompt (rest for completion)
+    context_prompt_budget_ratio: float = Field(default=0.6, ge=0.1, le=0.9)
+    # Hysteresis gap before triggering folding summarization
+    context_hysteresis_tokens: int = Field(default=1024, ge=0)
+
+    # Think tag rendering mode: hide | spoiler
+    think_render_mode: str = Field(default="hide")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="LOCALAPI_",
@@ -85,6 +104,22 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return [str(p).lower() if str(p).startswith(".") else f".{str(p).lower()}" for p in v]
         return v
+
+    @field_validator("think_render_mode", mode="before")
+    @classmethod
+    def _validate_think_mode(cls, v: object) -> str:
+        if not v:
+            return "hide"
+        val = str(v).lower().strip()
+        return val if val in {"hide", "spoiler"} else "hide"
+
+    @field_validator("app_base_url", mode="before")
+    @classmethod
+    def _norm_base_url(cls, v: object) -> str:
+        if not v:
+            return "http://127.0.0.1:8080"
+        s = str(v).strip().rstrip('/')
+        return s
 
 
 @lru_cache(maxsize=1)

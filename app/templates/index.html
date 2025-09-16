@@ -1,40 +1,36 @@
 <!doctype html>
-<html lang="ру">
+<html lang="ru">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Local AI — Chat</title>
   <style>
-    :root{--bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#a8b3cf;--acc:#4da3ff;}
-    *{box-sizing:border-box}
-    *::before,*::after{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Arial}
-    header{padding:16px 20px;border-bottom:1px solid #232836;background:#0f1115;position:sticky;top:0;z-index:100}
-    .wrap{max-width:980px;margin:0 auto;padding:20px}
-    .row{display:flex;gap:12px;align-items:center}
+    :root{--bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#a8b3cf;--acc:#4da3ff;--gap:0}
+    html,body{height:100%}
+    *,*::before,*::after{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Arial;display:flex;flex-direction:column;min-height:100vh}
+    header{padding:16px 20px;border-bottom:1px solid #232836;background:#0f1115;position:sticky;top:0;z-index:10}
+    .wrap{max-width:980px;width:100%;margin:0 auto;padding:20px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
     .card{background:var(--card);border:1px solid #232836;border-radius:14px;padding:14px}
-    .msgs{display:flex;flex-direction:column;gap:12px;padding-bottom:24px}
-    .msg{padding:12px;border-radius:12px}
+    main.wrap{flex:1 1 auto;display:flex;flex-direction:column;gap:var(--gap);min-height:0}
+    .msgs{flex:1 1 auto;display:flex;flex-direction:column;gap:12px;overflow:auto;padding:8px;border-radius:12px;align-items:stretch;width:100%;min-height:0}
+    .msg{padding:12px;border-radius:12px;max-width:100%;width:100%;overflow-wrap:anywhere;word-break:break-word}
     .u{background:#1e2430}
     .a{background:#131722}
     .meta{color:var(--muted);font-size:12px;margin-top:6px}
     button,input,textarea{font:inherit}
-    textarea{width:100%;min-height:80px;resize:vertical;background:#0f1115;color:var(--text);border:1px solid #232836;border-radius:12px;padding:10px}
+    textarea{width:100%;min-height:100px;resize:vertical;background:#0f1115;color:var(--text);border:1px solid #232836;border-radius:12px;padding:10px}
     .controls{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
     .controls button{background:var(--acc);border:none;color:#081120;padding:10px 14px;border-radius:10px;cursor:pointer}
     .controls input[type=file]{display:none}
     .pill{color:var(--muted);font-size:12px}
     a{color:#8ecbff}
     .kbd{font:12px/1 monospace;background:#0b0d12;border:1px solid #232836;border-radius:6px;padding:2px 6px}
-
-    /* Размышления под спойлером */
-    details.reasoning{background:#0b0d12;border:1px solid #232836;border-radius:10px;padding:8px;margin:8px 0}
-    details.reasoning > summary.reasoning-header{color:var(--muted);font-size:12px;cursor:pointer;user-select:none;outline:none}
-    details.reasoning > .reasoning-body{margin-top:6px;max-height:240px;overflow:auto;white-space:pre-wrap;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-    details.reasoning > summary::-webkit-details-marker{color:var(--muted)}
-
-    /* Композер закреплён внизу */
-    .composer{position:sticky;bottom:0;z-index:90;margin-top:8px}
+    details{background:#0f141d;border:1px solid #232836;border-radius:8px;padding:6px 10px;margin-top:6px}
+    details pre{white-space:pre-wrap;font:12px/1.4 monospace;margin:6px 0 0;padding:6px;background:#0b0f15;border:1px solid #232836;border-radius:6px;max-height:320px;overflow:auto}
+    label.checkbox{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);cursor:pointer}
+    .composer{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid #232836;padding-top:12px}
   </style>
 </head>
 <body>
@@ -43,19 +39,22 @@
     <strong>Local AI — Chat</strong>
     <span class="pill" id="thread-pill"></span>
     <span class="pill">Ctrl/⌘+Enter — отправить</span>
+    <label class="checkbox"><input type="checkbox" id="toggle-think"/> Показывать рассуждения</label>
   </div>
 </header>
 <main class="wrap">
   <div id="messages" class="msgs"></div>
 
-  <div class="card composer">
-    <textarea id="input" placeholder="Напишите сообщение..."></textarea>
-    <div class="controls">
-      <label for="file"><span class="kbd">+</span> Вложение</label>
-      <input id="file" type="file" />
-      <button id="send">Отправить</button>
-      <button id="new">Новый диалог</button>
-      <span id="status" class="pill"></span>
+  <div class="composer">
+    <div class="card">
+      <textarea id="input" placeholder="Напишите сообщение..."></textarea>
+      <div class="controls">
+        <label for="file"><span class="kbd">+</span> Вложение</label>
+        <input id="file" type="file" />
+        <button id="send">Отправить</button>
+        <button id="new">Новый диалог</button>
+        <span id="status" class="pill"></span>
+      </div>
     </div>
   </div>
 </main>
@@ -64,6 +63,7 @@
 const api = (path) => path.startsWith('http') ? path : (location.origin + path);
 let threadId = localStorage.getItem('thread_id') || null;
 let useWS = true;
+let CFG = { MODEL_CONTROLLER: '', CONTEXT_WINDOW_TOKENS: 0, CONTEXT_PROMPT_BUDGET_RATIO: 0 };
 
 const elMsgs = document.getElementById('messages');
 const elInput = document.getElementById('input');
@@ -72,11 +72,13 @@ const elFile = document.getElementById('file');
 const elNew = document.getElementById('new');
 const elStatus = document.getElementById('status');
 const elPill = document.getElementById('thread-pill');
+const elThink = document.getElementById('toggle-think');
 
-function scrollToBottom(){
-  try{ window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' }); }
-  catch(_){ window.scrollTo(0, document.documentElement.scrollHeight); }
-}
+let autoScroll = true;
+function scrollToBottom(){ elMsgs.scrollTo({ top: elMsgs.scrollHeight, behavior: 'auto' }); }
+function keepScrolled(){ if(autoScroll){ scrollToBottom(); } }
+function isNearBottom(){ return (elMsgs.scrollHeight - elMsgs.scrollTop - elMsgs.clientHeight) < 120; }
+elMsgs.addEventListener('scroll', ()=>{ autoScroll = isNearBottom(); });
 
 function setThread(id){
   threadId = id;
@@ -85,217 +87,159 @@ function setThread(id){
 }
 setThread(threadId);
 
-function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-function addMsg(role, text){
+function addMsg(role, html){
   const div = document.createElement('div');
   div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
-  div.innerHTML = escapeHtml(text).replace(/\n/g,'<br>');
+  div.innerHTML = html;
   elMsgs.appendChild(div);
-  scrollToBottom();
+  layout();
+  keepScrolled();
+}
+
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+async function loadConfig(){
+  try{ const res = await fetch(api('/config')); const cfg = await res.json(); CFG = cfg; applyThinkPref(cfg); }catch{}
+}
+
+function budgetStr(){
+  const b = Math.floor((CFG.CONTEXT_WINDOW_TOKENS||0) * (CFG.CONTEXT_PROMPT_BUDGET_RATIO||0));
+  return b ? ` | budget≈ ${b}` : '';
+}
+
+function applyThinkPref(cfg){
+  const saved = localStorage.getItem('think_mode');
+  if(saved){ elThink.checked = (saved === 'spoiler'); }
+  else { elThink.checked = (cfg.THINK_RENDER_MODE === 'spoiler'); }
+}
+
+async function setThinkMode(mode){
+  try{ await fetch(api('/config/think-mode'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode}) }); }
+  catch{}
+}
+
+elThink.addEventListener('change', ()=>{
+  const mode = elThink.checked ? 'spoiler' : 'hide';
+  localStorage.setItem('think_mode', mode);
+  setThinkMode(mode);
+  addMsg('assistant', '<em>Режим рассуждений: ' + (elThink.checked ? 'показ (спойлер)' : 'скрыто') + '</em>');
+});
+
+function wrapThinkSpoiler(inner){
+  inner = inner.trim(); if(!inner) return '';
+  return '<details><summary>Рассуждения</summary>\n<pre>'+escapeHtml(inner)+'</pre></details>\n';
+}
+
+function autoSpoiler(text){
+  if(/<details/i.test(text)) return text; // already wrapped
+  const m = /[\u0400-\u052F]/.exec(text); // first Cyrillic
+  if(!m) return text;
+  const cyrIdx = m.index;
+  let split = text.lastIndexOf('\n\n', cyrIdx);
+  if(split === -1) split = text.lastIndexOf('\n', cyrIdx);
+  const head = (split !== -1 ? text.slice(0, split) : text.slice(0, cyrIdx)).trim();
+  const tail = (split !== -1 ? text.slice(split) : text.slice(cyrIdx)).replace(/^\n+/, '');
+  if(head.length >= 80 && /[.!?]/.test(head)){
+    return wrapThinkSpoiler(head) + tail;
+  }
+  return text;
+}
+
+function transformThink(text){
+  const mode = elThink.checked ? 'spoiler' : 'hide';
+  if(mode === 'hide'){
+    return text.replace(/<think>[\s\S]*?<\/think>/gi,'');
+  }else{
+    if(/<think>/i.test(text)){
+      return text.replace(/<think>[\s\S]*?<\/think>/gi,(m)=>wrapThinkSpoiler(m.replace(/<\/?think>/gi,'').trim()));
+    }
+    return autoSpoiler(text);
+  }
 }
 
 async function uploadFile(file){
-  const fd = new FormData();
-  fd.append('file', file);
+  const fd = new FormData(); fd.append('file', file);
   const res = await fetch(api('/ui/upload'), { method:'POST', body: fd });
-  if(!res.ok){
-    if(res.status === 413) throw new Error('Файл слишком большой');
-    const text = await res.text();
-    throw new Error(text || 'Ошибка загрузки');
-  }
+  if(!res.ok){ if(res.status === 413) throw new Error('Файл слишком большой'); const text = await res.text(); throw new Error(text || 'Ошибка загрузки'); }
   return res.json();
 }
 
 elFile.addEventListener('change', async (e)=>{
-  const f = e.target.files?.[0];
-  if(!f) return;
-  elStatus.textContent = 'Загрузка файла…';
-  try{
-    const j = await uploadFile(f);
-    elInput.value = (elInput.value ? elInput.value + '\n' : '') + j.url;
-    elStatus.textContent = 'Файл готов: ' + j.url;
-  }catch(err){
-    elStatus.textContent = err.message || 'Ошибка загрузки';
-  }finally{
-    elFile.value = '';
-  }
+  const f = e.target.files?.[0]; if(!f) return; elStatus.textContent = 'Загрузка файла…';
+  try{ const j = await uploadFile(f); elInput.value = (elInput.value ? elInput.value + '\n' : '') + j.url; elStatus.textContent = 'Файл готов: ' + j.url; }
+  catch(err){ elStatus.textContent = err.message || 'Ошибка загрузки'; }
+  finally{ elFile.value = ''; }
 });
 
-function createAssistantNode(){
-  const div = document.createElement('div');
-  div.className = 'msg a';
-  const rs = document.createElement('details');
-  rs.className = 'reasoning';
-  rs.style.display = 'none'; // показываем только когда начнутся размышления
-  const rsHead = document.createElement('summary');
-  rsHead.className = 'reasoning-header';
-  rsHead.textContent = 'Размышления';
-  const rsBody = document.createElement('div');
-  rsBody.className = 'reasoning-body';
-  rs.appendChild(rsHead);
-  rs.appendChild(rsBody);
-  const body = document.createElement('div');
-  body.className = 'assistant-body';
-  div.appendChild(rs);
-  div.appendChild(body);
-  elMsgs.appendChild(div);
-  scrollToBottom();
-  return { container: div, body, rs, rsBody };
-}
-
 async function sendWS(){
-  const text = elInput.value.trim();
-  if(!text) return;
-  addMsg('user', text);
-  elInput.value = '';
-  elStatus.textContent = 'Стрим…';
-
+  const text = elInput.value.trim(); if(!text) return;
+  addMsg('user', escapeHtml(text).replace(/\n/g,'<br>'));
+  elInput.value=''; elStatus.textContent='Стрим…';
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/respond');
-  let ui = null;
-  let inThink = false;
-  let pending = '';
-  let answerText = '';
-  let reasoningText = '';
-
-  const openTagRe = /<(think|reasoning|thinking)\b[^>]*>/i;
-  const closeTagRe = /<\/\s*(think|reasoning|thinking)\s*>/i;
-
-  function updateUI(){
-    if(!ui) ui = createAssistantNode();
-    ui.body.innerHTML = escapeHtml(answerText).replace(/\n/g,'<br>');
-    // Показываем спойлер, если уже идёт think или накоплен текст размышлений
-    if(reasoningText || inThink){
-      ui.rs.style.display = '';
-      ui.rsBody.textContent = reasoningText;
-    } else {
-      ui.rs.style.display = 'none';
-    }
-    scrollToBottom();
-  }
-
-  function processPending(final=false){
-    while(pending.length > 0){
-      if(!inThink){
-        const m = pending.match(openTagRe);
-        if(m){
-          const i = m.index;
-          answerText += pending.slice(0, i);
-          pending = pending.slice(i + m[0].length);
-          inThink = true;
-          updateUI();
-        } else {
-          if(final){
-            answerText += pending;
-            pending = '';
-            updateUI();
-            break;
-          }
-          const keep = Math.min(pending.length, 8);
-          const flushLen = pending.length - keep;
-          if(flushLen > 0){
-            answerText += pending.slice(0, flushLen);
-            pending = pending.slice(flushLen);
-            updateUI();
-          } else {
-            break;
-          }
-        }
-      } else {
-        const m = pending.match(closeTagRe);
-        if(m){
-          const i = m.index;
-          reasoningText += pending.slice(0, i);
-          pending = pending.slice(i + m[0].length);
-          inThink = false;
-          updateUI();
-        } else {
-          if(final){
-            reasoningText += pending;
-            pending = '';
-            updateUI();
-            break;
-          }
-          const keep = Math.min(pending.length, 8);
-          const flushLen = pending.length - keep;
-          if(flushLen > 0){
-            reasoningText += pending.slice(0, flushLen);
-            pending = pending.slice(flushLen);
-            updateUI();
-          } else {
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  ws.onopen = () => {
-    const payload = { input_text: text, store: true };
-    if(threadId) payload.thread_id = threadId;
-    ws.send(JSON.stringify(payload));
-  };
-
-  ws.onmessage = (ev) => {
+  ws.onopen = () => { const payload = { input_text: text, store: true }; if(threadId) payload.thread_id = threadId; ws.send(JSON.stringify(payload)); };
+  let accRaw=''; let firstAssistShown=false;
+  ws.onmessage = (ev)=>{
     const msg = JSON.parse(ev.data);
-    if(msg.type === 'start'){
+    if(msg.type==='start'){
       if(!threadId && msg.thread_id) setThread(msg.thread_id);
-      if(!ui) ui = createAssistantNode();
-    }else if(msg.type === 'delta'){
-      pending += msg.text;
-      processPending(false);
-    }else if(msg.type === 'end'){
-      pending += '';
-      processPending(true); // финальная обработка — слить остатки
-      updateUI();
-      elStatus.textContent = msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '';
+    }else if(msg.type==='delta'){
+      accRaw += msg.text;
+      const rendered = transformThink(accRaw).replace(/\n/g,'<br>');
+      if(!firstAssistShown){ addMsg('assistant', rendered); firstAssistShown=true; }
+      else { elMsgs.lastChild.innerHTML = rendered; keepScrolled(); }
+    }else if(msg.type==='end'){
+      const budget = budgetStr();
+      elStatus.textContent = (msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
       ws.close();
-    }else if(msg.type === 'error'){
-      addMsg('assistant', '⚠️ Ошибка: ' + (msg.message || 'internal'));
-      elStatus.textContent = 'Ошибка';
-      ws.close();
+    }else if(msg.type==='error'){
+      addMsg('assistant','⚠️ Ошибка: '+(msg.message||'internal'));
+      elStatus.textContent='Ошибка'; ws.close();
     }
   };
-  ws.onerror = () => { addMsg('assistant','⚠️ WS error'); elStatus.textContent = 'Ошибка'; };
+  ws.onerror = ()=>{ addMsg('assistant','⚠️ WS error'); elStatus.textContent='Ошибка'; };
 }
 
 async function sendPOST(){
-  const text = elInput.value.trim();
-  if(!text) return;
-  addMsg('user', text);
-  elInput.value = '';
-  elStatus.textContent = 'Думаю…';
-
-  const payload = { input_text: text, store: true };
-  if(threadId) payload.thread_id = threadId;
-
+  const text = elInput.value.trim(); if(!text) return;
+  addMsg('user', escapeHtml(text).replace(/\n/g,'<br>'));
+  elInput.value=''; elStatus.textContent='Думаю…';
+  const payload = { input_text: text, store: true }; if(threadId) payload.thread_id = threadId;
   try{
-    const res = await fetch(api('/responses'), {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const j = await res.json();
-    if(!res.ok){ throw new Error((j && j.detail) || 'error'); }
-
+    const res = await fetch(api('/responses'), { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    const j = await res.json(); if(!res.ok) throw new Error((j && j.detail) || 'error');
     if(!threadId && j.thread_id) setThread(j.thread_id);
-    addMsg('assistant', j.output_text || '(пусто)');
-    elStatus.textContent = j.usage ? `tokens≈ ${j.usage.total_tokens}` : '';
+    const rendered = transformThink(j.output_text || '(пусто)').replace(/\n/g,'<br>');
+    const budget = budgetStr();
+    addMsg('assistant', rendered);
+    elStatus.textContent = (j.usage ? `tokens≈ ${j.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
   }catch(err){
-    addMsg('assistant', '⚠️ Ошибка: ' + err.message);
-    elStatus.textContent = 'Ошибка';
+    addMsg('assistant','⚠️ Ошибка: '+err.message);
+    elStatus.textContent='Ошибка';
   }
 }
 
-function send(){
-  if(useWS && 'WebSocket' in window){ sendWS(); }
-  else { sendPOST(); }
+function send(){ if(useWS && 'WebSocket' in window){ sendWS(); } else { sendPOST(); } }
+
+function layout(){
+  const header = document.querySelector('header');
+  const comp = document.querySelector('.composer');
+  const headerH = header ? header.getBoundingClientRect().height : 0;
+  const compH = comp ? comp.getBoundingClientRect().height : 0;
+  const wrapPaddingV = 40; // .wrap padding 20 top + 20 bottom
+  const h = Math.max(160, window.innerHeight - headerH - compH - wrapPaddingV);
+  elMsgs.style.height = h + 'px';
+  elMsgs.style.paddingBottom = '0px';
 }
 
-elSend.addEventListener('click', send);
-elInput.addEventListener('keydown', (e)=>{ if((e.metaKey || e.ctrlKey) && e.key === 'Enter'){ send(); } });
+document.addEventListener('DOMContentLoaded', ()=>{ layout(); keepScrolled(); });
+window.addEventListener('resize', layout);
+new ResizeObserver(layout).observe(document.querySelector('.composer'));
 
-elNew.addEventListener('click', ()=>{ setThread(null); addMsg('assistant', '— Новый диалог —'); });
+elSend.addEventListener('click', send);
+elInput.addEventListener('keydown', (e)=>{ if((e.metaKey||e.ctrlKey) && e.key==='Enter'){ send(); } });
+elNew.addEventListener('click', ()=>{ setThread(null); addMsg('assistant','— Новый диалог —'); });
+
+loadConfig();
 </script>
 </body>
 </html>

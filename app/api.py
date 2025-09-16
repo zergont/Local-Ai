@@ -6,23 +6,16 @@ Endpoints:
 - GET /threads/{thread_id}/messages?limit=50
 - GET /threads/{thread_id}/summary
 - POST /threads/{thread_id}/summarize
-- GET /file/{id} -> serve local static file by id (simple dev helper)
-- UI: GET / (HTML chat), POST /ui/upload (file upload)
-- GET /config -> returns runtime config (non-secret)
-
-Run:
-    uvicorn Local_Ai:app --host 0.0.0.0 --port 8080
-
-Sanity tests:
-    curl -s -X POST http://localhost:8080/responses \
-      -H 'content-type: application/json' \
-      -d '{"input_text":"Hello!"}' | jq .
+- GET /file/{id}
+- /config, UI, upload
+- /debug/context/{thread_id}
+- POST /config/think-mode
 """
 from __future__ import annotations
 
 import uuid as _uuid
 import orjson
-from typing import Any, List
+from typing import Any
 from pathlib import Path
 import asyncio
 import time
@@ -45,7 +38,7 @@ from .ws import router as ws_router
 class ORJSONResponse2(ORJSONResponse):
     media_type = "application/json"
 
-    def render(self, content: Any) -> bytes:
+    def render(self, content: Any) -> bytes:  # type: ignore[override]
         return orjson.dumps(content)
 
 
@@ -63,58 +56,6 @@ def create_app() -> FastAPI:
     # expose service to ws router via app.state
     app.state.service = service
     app.state.llm_online = False
-    app.state.llm_probe_task = None
-
-    async def _probe_llm_once() -> tuple[bool, int | None]:
-        """Try to GET /models once, return (ok, models_count)."""
-        base = settings.llm_base_url.rstrip("/")
-        url = f"{base}/models"
-        t0 = time.perf_counter()
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-        dt_ms = int((time.perf_counter() - t0) * 1000)
-        n_models = len(data.get("data", [])) if isinstance(data, dict) else None
-        return True, n_models
-
-    async def _llm_watchdog() -> None:
-        """Background task: if LLM оффлайн, пытаться подключаться каждые 30 сек.
-        При успехе — показывать баннер и помечать online, затем завершиться.
-        """
-        base = settings.llm_base_url.rstrip("/")
-        attempt = 0
-        while True:
-            if app.state.llm_online:
-                return
-            attempt += 1
-            # информируем о попытке соединения
-            log_info("проверка_llm_повтор", база=base, попытка=attempt, сообщение="Фоновая попытка подключения к LLM")
-            try:
-                ok, n = await _probe_llm_once()
-                if ok:
-                    app.state.llm_online = True
-                    log_info(
-                        "проверка_llm_успех",
-                        база=base,
-                        задержка_мс=0,
-                        моделей=n,
-                        сообщение="Связь с LLM установлена (фоновая проверка)",
-                    )
-                    print_banner(
-                        "LLM — подключен",
-                        [
-                            f"LLM API: {settings.llm_base_url}",
-                            f"Модель диалога: {settings.llm_model}",
-                            f"Доступных моделей: {n if n is not None else '—'}",
-                        ],
-                    )
-                    return
-            except Exception:
-                # тихо ждём следующую попытку
-                await asyncio.sleep(30)
-                continue
-            await asyncio.sleep(30)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -134,6 +75,7 @@ def create_app() -> FastAPI:
                 вижн_модель=settings.vision_model,
                 макс_загрузка_мб=settings.max_upload_mb,
                 разрешённые_расширения=settings.allowed_exts,
+                base_url=settings.app_base_url,
             )
             print_banner(
                 "Local AI — сервер запущен",
@@ -143,6 +85,7 @@ def create_app() -> FastAPI:
                     f"Vision: {settings.vision_model}",
                     f"LLM API: {settings.llm_base_url}",
                     f"Схема: {schema_path}",
+                    f"BASE URL: {settings.app_base_url}",
                 ],
             )
         except Exception as e:  # noqa: BLE001
@@ -167,13 +110,7 @@ def create_app() -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 dt_ms = int((time.perf_counter() - t0) * 1000)
-                log_error(
-                    "проверка_llm_ошибка",
-                    база=base,
-                    задержка_мс=dt_ms,
-                    попытка=attempt,
-                    ошибка=f"{type(e).__name__}: {str(e)}",
-                )
+                log_error("проверка_llm_ошибка", база=base, задержка_мс=dt_ms, попытка=attempt, ошибка=f"{type(e).__name__}: {str(e)}")
                 await asyncio.sleep(0.25 * (2 ** (attempt - 1)))
         if not app.state.llm_online:
             log_error("проверка_llm_не_доступен", база=base, ошибка=str(last_err) if last_err else "неизвестно")
@@ -184,20 +121,11 @@ def create_app() -> FastAPI:
                     "Проверьте адрес/порт, доступность LM Studio и значения переменных окружения.",
                 ],
             )
-            # start background watchdog to retry every 30s until success
-            app.state.llm_probe_task = asyncio.create_task(_llm_watchdog())
         # Init summarizer module
         summarizer.init(db, llm)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        # cancel watchdog if running
-        task = getattr(app.state, "llm_probe_task", None)
-        if task is not None:
-            try:
-                task.cancel()
-            except Exception:
-                pass
         await llm.aclose()
         await db.close()
         log_info("остановка", сообщение="Сервис остановлен")
@@ -214,7 +142,23 @@ def create_app() -> FastAPI:
             "MAX_UPLOAD_MB": s.max_upload_mb,
             "ALLOWED_EXTS": s.allowed_exts,
             "LLM_ONLINE": bool(app.state.llm_online),
+            "CONTEXT_WINDOW_TOKENS": s.context_window_tokens,
+            "CONTEXT_PROMPT_BUDGET_RATIO": s.context_prompt_budget_ratio,
+            "CONTEXT_HYSTERESIS_TOKENS": s.context_hysteresis_tokens,
+            "THINK_RENDER_MODE": s.think_render_mode,
+            "APP_BASE_URL": s.app_base_url,
         }
+
+    @app.post("/config/think-mode")
+    async def post_think_mode(payload: dict[str, Any]) -> dict[str, Any]:
+        mode = str(payload.get("mode", "")).strip().lower()
+        if mode not in {"hide", "spoiler"}:
+            raise HTTPException(status_code=400, detail="invalid mode")
+        # mutate runtime setting
+        svc: LocalResponsesService = app.state.service
+        svc._s.think_render_mode = mode  # type: ignore[attr-defined]
+        log_info("think_mode_set", mode=mode)
+        return {"THINK_RENDER_MODE": mode}
 
     @app.post("/responses", response_model=ResponsePayload)
     async def post_responses(req: ResponseRequest) -> ResponsePayload:
@@ -227,13 +171,7 @@ def create_app() -> FastAPI:
                 user_text=req.input_text,
                 store=req.store,
             )
-            return ResponsePayload(
-                response_id=resp_id,
-                thread_id=actual_thread_id,
-                output_text=output_text,
-                status="completed",
-                usage=usage,
-            )
+            return ResponsePayload(response_id=resp_id, thread_id=actual_thread_id, output_text=output_text, status="completed", usage=usage)
         except Exception as e:  # noqa: BLE001
             if resp_id:
                 log_error("ошибка_post_responses", ошибка=str(e), trace_id=rid, response_id=resp_id)
@@ -277,6 +215,13 @@ def create_app() -> FastAPI:
         if not path.is_file() or base not in path.parents:
             raise HTTPException(status_code=404, detail="not found")
         return FileResponse(path)
+
+    @app.get("/debug/context/{thread_id}")
+    async def get_debug_context(thread_id: str) -> Any:
+        try:
+            return await service.debug_context(thread_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(e))
 
     return app
 

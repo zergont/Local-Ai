@@ -4,17 +4,46 @@ from __future__ import annotations
 import json
 import time
 import uuid
+import sys
+import re
 from typing import Any, AsyncIterator, Dict, List, Tuple
 
 from .config import get_settings
 from .db import Database
 from .llm_client import LLMClient
 from .logging_utils import log_info, log_error
-from .tooling import list_tools, tools_openai_format, maybe_call_one_tool
 
+try:  # pragma: no cover
+    from .utils_tokens import estimate_messages_tokens, estimate_tokens  # type: ignore
+except Exception:  # pragma: no cover
+    def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:  # type: ignore
+        total = 0
+        for m in messages:
+            c = m.get("content", "")
+            if isinstance(c, list):
+                flat_parts: List[str] = []
+                for part in c:
+                    if isinstance(part, str):
+                        flat_parts.append(part)
+                    elif isinstance(part, dict):
+                        for v in part.values():
+                            if isinstance(v, str):
+                                flat_parts.append(v)
+                c = " ".join(flat_parts)
+            if not isinstance(c, str):
+                c = str(c)
+            total += max(1, int(len(c)/4)+2)
+        return total
+    def estimate_tokens(text: str) -> int:  # type: ignore
+        return max(1, int(len(text)/4)+1)
 
-# Keep system prompt minimal; do not block chain-of-thought explicitly.
-SYSTEM_PROMPT = "You are a helpful assistant. Be concise."
+SYSTEM_PROMPT = (
+    "You are a helpful assistant. Be concise. "
+    "If you need to deliberate or outline steps, put ALL of that inside <think>…</think> and write the final answer after the tag."
+)
+THINK_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
+CYR_RE = re.compile(r"[\u0400-\u052F]")
+MEMORY_NAME_RE = re.compile(r"запомни,? что меня зовут (.+)$", re.IGNORECASE)
 
 
 class LocalResponsesService:
@@ -22,102 +51,179 @@ class LocalResponsesService:
         self._db = db
         self._llm = llm
         self._s = get_settings()
-        self._tools = {t.name: t for t in list_tools()}
 
-    async def build_context(self, thread_id: str) -> List[Dict[str, str]]:
+    def _wrap_think_block(self, inner: str) -> str:
+        inner = inner.strip()
+        if not inner:
+            return ""
+        esc = inner.replace("<", "&lt;")
+        return f"<details><summary>Рассуждения</summary>\n<pre>{esc}</pre></details>\n"
+
+    def _auto_spoiler_if_needed(self, text: str) -> str:
+        # If already has <details>, leave it
+        if "<details" in text.lower():
+            return text
+        # Heuristic: many models write analysis in English first, then the final answer in Russian.
+        m = CYR_RE.search(text)
+        if not m:
+            return text
+        cyr_idx = m.start()
+        # Choose split at the previous empty line before the first Cyrillic char
+        split = text.rfind("\n\n", 0, cyr_idx)
+        if split == -1:
+            split = text.rfind("\n", 0, cyr_idx)
+        head = text[:split].strip() if split != -1 else text[:cyr_idx].strip()
+        tail = text[split:].lstrip("\n") if split != -1 else text[cyr_idx:]
+        # Only wrap if head looks like analysis (long enough, multiple sentences)
+        if len(head) >= 80 and (head.count(".") + head.count("!") + head.count("?")) >= 2:
+            return self._wrap_think_block(head) + tail
+        return text
+
+    def _render_think_final(self, text: str) -> str:
+        mode = self._s.think_render_mode
+        if mode == "hide":
+            return THINK_RE.sub("", text)
+        if mode == "spoiler":
+            if THINK_RE.search(text):
+                return THINK_RE.sub(lambda m: self._wrap_think_block(m.group(1)), text)
+            # No tags -> try heuristic wrapping
+            return self._auto_spoiler_if_needed(text)
+        return text
+
+    def _strip_stream_delta(self, acc: str, delta: str) -> tuple[str, str]:
+        mode = self._s.think_render_mode
+        new_acc = acc + delta
+        if mode == "hide":
+            open_pos = new_acc.rfind("<think>")
+            close_pos = new_acc.rfind("</think>")
+            if open_pos != -1 and (close_pos == -1 or close_pos < open_pos):
+                visible = re.sub(r"<think>[\s\S]*$", "", new_acc, flags=re.IGNORECASE)
+                public_delta = visible[len(self._render_think_final(acc)):]  # incremental
+                return new_acc, public_delta
+            cleaned = THINK_RE.sub("", new_acc)
+            public_delta = cleaned[len(self._render_think_final(acc)):]  # diff
+            return new_acc, public_delta
+        elif mode == "spoiler":
+            rendered = self._render_think_final(new_acc)
+            prev_rendered = self._render_think_final(acc)
+            public_delta = rendered[len(prev_rendered):]
+            return new_acc, public_delta
+        else:
+            return new_acc, delta
+
+    async def _maybe_store_memory(self, user_text: str) -> None:
+        m = MEMORY_NAME_RE.search(user_text.strip())
+        if not m:
+            return
+        name = m.group(1).strip().strip('.!')
+        if len(name) > 80:
+            name = name[:80]
+        await self._db.upsert_profile_kv("user.name", name)
+        log_info("memory_store", key="user.name", value=name)
+
+    async def build_context(self, thread_id: str, *, k_override: int | None = None) -> List[Dict[str, str]]:
         chat: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        uname = await self._db.get_profile_value("user.name")
+        if uname:
+            chat.append({"role": "system", "content": f"Факты о пользователе: имя = {uname}."})
         summary = await self._db.get_summary(thread_id)
         if summary:
             chat.append({"role": "system", "content": f"Thread summary: {summary}"})
-        recent = await self._db.get_thread_messages(thread_id, self._s.max_context_messages)
+        k = k_override if k_override is not None else self._s.max_context_messages
+        recent = await self._db.get_thread_messages(thread_id, k)
         for m in reversed(recent):
             chat.append({"role": str(m["role"]), "content": str(m["content"])})
         return chat
 
-    async def _maybe_tool_call(self, messages: List[Dict[str, Any]], model_text: str, raw_resp: Dict[str, Any]) -> List[Dict[str, Any]]:
-        try:
-            tool_calls = raw_resp.get("choices", [{}])[0].get("message", {}).get("tool_calls")
-        except Exception:
-            tool_calls = None
-        if not tool_calls:
-            return messages
-        call = tool_calls[0]
-        fn = call.get("function", {})
-        name = str(fn.get("name", ""))
-        arguments = fn.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                args_obj = json.loads(arguments)
-            except Exception:
-                args_obj = {}
-        elif isinstance(arguments, dict):
-            args_obj = arguments
-        else:
-            args_obj = {}
-        tool = self._tools.get(name)
-        if not tool:
-            log_error("tool_not_found", tool=name)
-            return messages
+    async def _fold_history(self, thread_id: str) -> None:
+        rows = list(reversed(await self._db.get_thread_messages(thread_id, 5000)))
+        lines: List[str] = []
+        for r in rows:
+            role = str(r.get("role", ""))
+            if role == "tool":
+                continue
+            content = str(r.get("content", "")).strip()
+            if content:
+                lines.append(f"{role}: {content}")
+        convo_text = "\n".join(lines)
+        if not convo_text:
+            return
+        system = "Сожми историю диалога в краткий конспект. Сохрани имена, предпочтения, задачи, факты и ссылки. Будь кратким и точным."
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": convo_text},
+        ]
         t0 = time.perf_counter()
         try:
-            result = await tool.invoke(**args_obj)
-            ok = True
+            summary, _usage = await self._llm.chat(messages)
+            dt_ms = int((time.perf_counter() - t0) * 1000)
+            sys.stdout.write(json.dumps({"phase": "summary", "model": self._s.llm_model, "stream": False, "thread_id": thread_id, "latency": dt_ms}, ensure_ascii=False) + "\n"); sys.stdout.flush()
         except Exception as e:  # noqa: BLE001
-            result = {"error": str(e)}
-            ok = False
-        dt_ms = int((time.perf_counter() - t0) * 1000)
-        log_info("tool_call", tool=name, latency_ms=dt_ms, status="ok" if ok else "error")
-        messages.append({"role": "tool", "name": name, "content": json.dumps(result, ensure_ascii=False)})
-        return messages
+            dt_ms = int((time.perf_counter() - t0) * 1000)
+            sys.stdout.write(json.dumps({"phase": "summary", "model": self._s.llm_model, "stream": False, "thread_id": thread_id, "latency": dt_ms, "error": str(e)[:120]}, ensure_ascii=False) + "\n"); sys.stdout.flush()
+            log_error("fold_history_error", thread_id=thread_id, error=str(e))
+            return
+        await self._db.upsert_summary(thread_id, summary)
+        log_info("fold_history_ok", thread_id=thread_id, length=len(summary))
 
-    async def respond(
-        self,
-        *,
-        thread_id: str | None,
-        previous_response_id: str | None,
-        user_text: str,
-        store: bool,
-    ) -> Tuple[str, str, str, Dict[str, int], str]:
+    def _apply_budget(self, _tokens: int) -> int:
+        return int(self._s.context_window_tokens * self._s.context_prompt_budget_ratio)
+
+    async def _ensure_budget(self, thread_id: str, *, user_text: str) -> List[Dict[str, str]]:
+        chat = await self.build_context(thread_id)
+        used = estimate_messages_tokens(chat)
+        budget = self._apply_budget(used)
+        if used > budget + self._s.context_hysteresis_tokens:
+            await self._fold_history(thread_id)
+            chat = await self.build_context(thread_id)
+            used = estimate_messages_tokens(chat)
+        if used > budget:
+            k = self._s.max_context_messages
+            while used > budget and k > 1:
+                k = max(1, int(k * 0.7))
+                chat = await self.build_context(thread_id, k_override=k)
+                used = estimate_messages_tokens(chat)
+            log_info("context_trim", thread_id=thread_id, tokens=used, budget=budget, k_final=k)
+        else:
+            log_info("context_ok", thread_id=thread_id, tokens=used, budget=budget)
+        return chat
+
+    def _log_final(self, thread_id: str, response_id: str, latency_ms: int) -> None:
+        line = {"phase": "final", "model": self._s.llm_model, "stream": True, "thread_id": thread_id, "response_id": response_id, "latency": latency_ms}
+        sys.stdout.write(json.dumps(line, ensure_ascii=False) + "\n"); sys.stdout.flush()
+
+    async def _run_stream_collect(self, messages: List[Dict[str, Any]]) -> tuple[str, Dict[str, int]]:
+        parts: List[str] = []
+        async for delta in self._llm.chat_stream(messages):
+            parts.append(delta)
+        full_raw = "".join(parts).strip()
+        final_text = self._render_think_final(full_raw)
+        prompt_tokens = estimate_messages_tokens(messages)
+        completion_tokens = estimate_tokens(full_raw)
+        usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
+        return final_text, usage
+
+    async def respond(self, *, thread_id: str | None, previous_response_id: str | None, user_text: str, store: bool) -> Tuple[str, str, str, Dict[str, int], str]:
         actual_thread_id = await self._db.resolve_thread(previous_response_id, thread_id)
+        await self._maybe_store_memory(user_text)
         if store:
             user_msg_id = await self._db.insert_message(actual_thread_id, "user", user_text)
         else:
             user_msg_id = str(uuid.uuid4())
-        chat = await self.build_context(actual_thread_id)
+        chat = await self._ensure_budget(actual_thread_id, user_text=user_text)
         chat.append({"role": "user", "content": user_text})
-        tools = tools_openai_format()
         t0 = time.perf_counter()
-        text, usage = await self._llm.chat(chat, tools=tools)
-        raw = await self._llm.chat_raw(chat, tools=tools)
+        text, usage = await self._run_stream_collect(chat)
         dt_ms = int((time.perf_counter() - t0) * 1000)
-        log_info("llm_response", thread_id=actual_thread_id, latency_ms=dt_ms)
-        chat = await self._maybe_tool_call(chat + [{"role": "assistant", "content": text}], text, raw)
-        if chat and chat[-1].get("role") == "tool":
-            t1 = time.perf_counter()
-            text2, usage2 = await self._llm.chat(chat, tools=tools)
-            dt_ms2 = int((time.perf_counter() - t1) * 1000)
-            log_info("llm_response", thread_id=actual_thread_id, latency_ms=dt_ms2)
-            text = text2
-            usage = {
-                "prompt_tokens": int(usage.get("prompt_tokens", 0)) + int(usage2.get("prompt_tokens", 0)),
-                "completion_tokens": int(usage.get("completion_tokens", 0)) + int(usage2.get("completion_tokens", 0)),
-                "total_tokens": int(usage.get("total_tokens", 0)) + int(usage2.get("total_tokens", 0)),
-            }
-        # Store and return raw assistant text (UI collapses reasoning safely)
         if store:
             assistant_msg_id = await self._db.insert_message(actual_thread_id, "assistant", text)
         else:
             assistant_msg_id = str(uuid.uuid4())
-        resp_id = await self._db.insert_response(
-            actual_thread_id,
-            input_message_id=user_msg_id,
-            status="completed",
-            usage=usage,
-            error=None,
-        )
+        resp_id = await self._db.insert_response(actual_thread_id, input_message_id=user_msg_id, status="completed", usage=usage, error=None)
         await self._db.update_response_output(resp_id, assistant_msg_id, status="completed")
+        self._log_final(actual_thread_id, resp_id, dt_ms)
         try:
-            row = await self._db.fetch_one("SELECT COUNT(1) AS n FROM messages WHERE thread_id=?", [actual_thread_id])
+            row = await self._db.fetch_one("SELECT COUNT(1) AS n FROM messages WHERE thread_id= ?", [actual_thread_id])
             count = int(row["n"]) if row else 0
             if count >= self._s.summarize_after_messages and store:
                 from . import summarizer
@@ -128,19 +234,62 @@ class LocalResponsesService:
 
     async def respond_stream(self, *, user_text: str, thread_id: str | None, previous_response_id: str | None, store: bool) -> AsyncIterator[Dict[str, Any]]:
         actual_thread_id = await self._db.resolve_thread(previous_response_id, thread_id)
+        await self._maybe_store_memory(user_text)
         user_msg_id = await self._db.insert_message(actual_thread_id, "user", user_text)
-        messages = await self.build_context(actual_thread_id)
+        messages = await self._ensure_budget(actual_thread_id, user_text=user_text)
         messages.append({"role": "user", "content": user_text})
-        tools = tools_openai_format()
-        probe_raw = await self._llm.chat_raw(messages, tools=tools)
-        messages, _ = await maybe_call_one_tool(messages + [{"role": "assistant", "content": ""}], probe_raw)
         response_id = str(uuid.uuid4())
+        t0 = time.perf_counter()
         yield {"type": "start", "response_id": response_id, "thread_id": actual_thread_id}
-        buf: List[str] = []
-        async for delta in self._llm.chat_stream(messages, tools=tools):
-            buf.append(delta)
-            yield {"type": "delta", "text": delta}
-        output_text = "".join(buf).strip()
-        out_msg_id = await self._db.insert_message(actual_thread_id, "assistant", output_text)
-        await self._db.insert_response(actual_thread_id, user_msg_id, status="completed", usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-        yield {"type": "end", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+        raw_acc = ""; public_acc = ""
+        async for delta in self._llm.chat_stream(messages):
+            raw_acc, public_delta = self._strip_stream_delta(raw_acc, delta)
+            if public_delta:
+                public_acc += public_delta
+                yield {"type": "delta", "text": public_delta}
+        final_text = self._render_think_final(raw_acc)
+        prompt_tokens = estimate_messages_tokens(messages)
+        completion_tokens = estimate_tokens(raw_acc)
+        usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens}
+        out_msg_id = await self._db.insert_message(actual_thread_id, "assistant", final_text)
+        await self._db.insert_response(actual_thread_id, user_msg_id, status="completed", usage=usage)
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        yield {"type": "end", "usage": usage}
+        self._log_final(actual_thread_id, response_id, dt_ms)
+
+    async def debug_context(self, thread_id: str) -> Dict[str, Any]:
+        s = self._s
+        budget = int(s.context_window_tokens * s.context_prompt_budget_ratio)
+        async def _build(k: int) -> List[Dict[str, str]]:
+            chat: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+            uname = await self._db.get_profile_value("user.name")
+            if uname:
+                chat.append({"role": "system", "content": f"Факты о пользователе: имя = {uname}."})
+            summary = await self._db.get_summary(thread_id)
+            if summary:
+                chat.append({"role": "system", "content": f"Thread summary: {summary}"})
+            recent = await self._db.get_thread_messages(thread_id, k)
+            for m in reversed(recent):
+                chat.append({"role": str(m["role"]), "content": str(m["content"])})
+            return chat
+        k = s.max_context_messages
+        chat = await _build(k)
+        used = estimate_messages_tokens(chat)
+        if used > budget:
+            while used > budget and k > 1:
+                k = max(1, int(k * 0.7))
+                chat = await _build(k)
+                used = estimate_messages_tokens(chat)
+        summary_tokens = 0
+        for m in chat:
+            if m["role"] == "system" and m["content"].startswith("Thread summary:"):
+                summary_tokens = estimate_messages_tokens([m])
+                break
+        items: List[Dict[str, Any]] = []
+        for m in chat:
+            t = estimate_messages_tokens([m])
+            content = str(m.get("content", ""))
+            preview = content[:160] + ("…" if len(content) > 160 else "")
+            items.append({"role": m.get("role", ""), "tokens": t, "preview": preview})
+        remaining = max(0, budget - used)
+        return {"thread_id": thread_id, "budget_tokens": budget, "estimated_used": used, "remaining": remaining, "summary_tokens": summary_tokens, "k_last_used": k, "messages": items}
