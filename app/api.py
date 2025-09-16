@@ -140,10 +140,32 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             ok_db = False
             log_error("health_db_error", error=str(e))
+        # Check LLM live status on each call (short timeout), but log only on state change
+        s = get_settings()
+        base = s.llm_base_url.rstrip("/")
+        url = f"{base}/models"
+        prev = bool(app.state.llm_online)
+        live = False
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                _ = r.json()
+            live = True
+        except Exception:
+            live = False
+        # Update and log only on change
+        app.state.llm_online = live
+        if live != prev:
+            if live:
+                log_info("llm_online", base_url=base)
+            else:
+                log_error("llm_offline", base_url=base)
         return {
             "db": ok_db,
-            "llm_online": bool(app.state.llm_online),
-            "model": settings.llm_model,
+            "llm_online": bool(live),
+            "model": s.llm_model,
+            "llm_base_url": base,
         }
 
     @app.get("/config")

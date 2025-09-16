@@ -120,9 +120,9 @@ function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt
 function wrapThinkSpoiler(inner, isStreaming = false, spoilerIndex = 0){
   inner = String(inner).trim(); 
   if(!inner) return '';
-  // Создаем стабильный ID на основе времени и индекса
-  const detailsId = `think-${Date.now()}-${spoilerIndex}`;
-  return `<details class="think-spoiler" ${isStreaming ? 'data-streaming="true"' : ''} id="${detailsId}"><summary>Рассуждения</summary>\n<pre data-content="${escapeHtml(inner)}">${escapeHtml(inner)}</pre></details>\n`;
+  const detailsId = `think-${spoilerIndex}`; // стабильный id для live и fixed
+  const openAttr = isStreaming ? ' open' : '';
+  return `<details class="think-spoiler" ${isStreaming ? 'data-streaming="true"' : ''} id="${detailsId}"${openAttr}><summary>Рассуждения</summary>\n<pre data-content="${escapeHtml(inner)}">${escapeHtml(inner)}</pre></details>\n`;
 }
 
 function processThinkTags(text){
@@ -138,7 +138,8 @@ function processThinkTags(text){
     out += escapeHtml(before);
     // Добавляем спойлер или скрываем содержимое <think>
     if (showThink) {
-      out += wrapThinkSpoiler(m[1], false, idx++);
+      out += wrapThinkSpoiler(m[1], false, idx);
+      idx++;
     }
     last = re.lastIndex;
   }
@@ -152,14 +153,13 @@ function processStreamingThink(rawText) {
   const showThink = elThink && elThink.checked;
   const src = String(rawText || '');
   
-  // Проверяем, есть ли незавершенный тег <think>
   const openPos = src.lastIndexOf('<think>');
   const closePos = src.lastIndexOf('</think>');
   
   if (openPos !== -1 && (closePos === -1 || closePos < openPos)) {
     // У нас есть незавершенный тег <think>
     const beforeThink = src.substring(0, openPos);
-    const insideThink = src.substring(openPos + 7); // +7 для "<think>"
+    const insideThink = src.substring(openPos + 7);
     
     if (!showThink) {
       // Не показываем теги think, отображаем только безопасный текст до тега
@@ -167,7 +167,7 @@ function processStreamingThink(rawText) {
     } else {
       // Считаем количество завершенных спойлеров для правильного индекса
       const completedThinks = (beforeThink.match(/<\/think>/gi) || []).length;
-      // Показываем интерактивный спойлер с тем что есть пока
+      // Показываем интерактивный спойлер с тем что есть пока (открыт по умолчанию)
       return processThinkTags(beforeThink) + wrapThinkSpoiler(insideThink, true, completedThinks);
     }
   } else {
@@ -210,7 +210,7 @@ function updateMessageWithSpoilerState(element, rawText) {
   const processedText = processStreamingThink(rawText);
   element.innerHTML = processedText.replace(/\n/g, '<br>');
   
-  // Восстанавливаем состояние спойлеров
+  // Восстанавливаем состояние открытых спойлеров
   restoreOpenSpoilers(element);
   
   // Добавляем обработчики для отслеживания изменений состояния
@@ -256,13 +256,22 @@ elThink.addEventListener('change', ()=>{
   const mode = elThink.checked ? 'show' : 'hide';
   localStorage.setItem('think_mode', mode);
   
-  // Перерендерим все сообщения ассистента с новым режимом
+  // Перерендерим все сообщения ассистента с сохранением состояния открытых спойлеров
   const assistantMsgs = document.querySelectorAll('.msg.a');
   assistantMsgs.forEach(msgEl => {
+    // Сохраняем ID открытых спойлеров до перерисовки
+    const openIds = Array.from(msgEl.querySelectorAll('details.think-spoiler'))
+      .filter(d => d.open && d.id)
+      .map(d => d.id);
     const originalHtml = msgEl.getAttribute('data-original');
     if (originalHtml) {
       const processedText = processThinkTags(originalHtml.replace(/<br>/g, '\n'));
       msgEl.innerHTML = processedText.replace(/\n/g, '<br>');
+      // Восстанавливаем только ранее открытые спойлеры
+      openIds.forEach(id => {
+        const d = msgEl.querySelector(`#${CSS.escape(id)}`);
+        if (d) d.open = true;
+      });
     }
   });
 });
@@ -317,15 +326,7 @@ async function sendWS(){
         keepScrolled(); 
       }
     }else if(msg.type==='end'){
-      // Убираем атрибут streaming у всех спойлеров в последнем сообщении
-      const lastMsg = elMsgs.lastChild;
-      if (lastMsg) {
-        const streamingSpoilers = lastMsg.querySelectorAll('details.think-spoiler[data-streaming="true"]');
-        streamingSpoilers.forEach(spoiler => {
-          spoiler.removeAttribute('data-streaming');
-        });
-      }
-      
+      // Ничего не сворачиваем: состояние сохранится за счёт стабильных id и restoreOpenSpoilers
       const budget = budgetStr();
       elStatus.textContent = (msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
       ws.close();
