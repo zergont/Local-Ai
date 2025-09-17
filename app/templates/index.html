@@ -4,6 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Local AI — Chat</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
   <style>
     :root{--bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#a8b3cf;--acc:#4da3ff;--gap:0}
     html,body{height:100%}
@@ -83,6 +84,14 @@ const elPill = document.getElementById('thread-pill');
 const elThink = document.getElementById('toggle-think');
 const elLlmDot = document.getElementById('llm-dot');
 
+// Helpers to remove leading blank lines (start of message and right after </think>)
+function normalizeStart(text){
+  return String(text || '').replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+function trimLeadingBlank(s){
+  return String(s || '').replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
 let autoScroll = true;
 function scrollToBottom(){ elMsgs.scrollTo({ top: elMsgs.scrollHeight, behavior: 'auto' }); }
 function keepScrolled(){ if(autoScroll){ scrollToBottom(); } }
@@ -101,9 +110,9 @@ function addMsg(role, html){
   div.className = 'msg ' + (role === 'user' ? 'u' : 'a');
   
   if (role === 'assistant') {
-    // Сохраняем оригинальный HTML и обрабатываем теги think с безопасным экранированием
-    div.setAttribute('data-original', html);
-    const processedText = processThinkTags((html || '').replace(/<br>/g, '\n'));
+    const norm = normalizeStart((html || '').replace(/<br>/g, '\n'));
+    div.setAttribute('data-original', norm);
+    const processedText = processThinkTags(norm);
     div.innerHTML = processedText.replace(/\n/g, '<br>');
   } else {
     div.textContent = html;
@@ -116,13 +125,12 @@ function addMsg(role, html){
 
 function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }
 
-// Функции для обработки тегов <think> на клиенте с безопасным экранированием
 function wrapThinkSpoiler(inner, isStreaming = false, spoilerIndex = 0){
   inner = String(inner).trim(); 
   if(!inner) return '';
-  const detailsId = `think-${spoilerIndex}`; // стабильный id для live и fixed
+  const detailsId = `think-${spoilerIndex}`;
   const openAttr = isStreaming ? ' open' : '';
-  return `<details class="think-spoiler" ${isStreaming ? 'data-streaming="true"' : ''} id="${detailsId}"${openAttr}><summary>Рассуждения</summary>\n<pre data-content="${escapeHtml(inner)}">${escapeHtml(inner)}</pre></details>\n`;
+  return `<details class="think-spoiler" ${isStreaming ? 'data-streaming=\"true\"' : ''} id="${detailsId}"${openAttr}><summary>Рассуждения</summary>\n<pre data-content="${escapeHtml(inner)}">${escapeHtml(inner)}</pre></details>\n`;
 }
 
 function processThinkTags(text){
@@ -130,100 +138,69 @@ function processThinkTags(text){
   const src = String(text || '');
   let out = '';
   let last = 0;
+  let sawThink = false;
   const re = /<think>([\s\S]*?)<\/think>/gi;
   let m; let idx = 0;
   while((m = re.exec(src)) !== null){
     const before = src.slice(last, m.index);
-    // Экранируем обычный текст
     out += escapeHtml(before);
-    // Добавляем спойлер или скрываем содержимое <think>
-    if (showThink) {
+    if (showThink){
       out += wrapThinkSpoiler(m[1], false, idx);
-      idx++;
+      idx++; sawThink = true;
     }
     last = re.lastIndex;
   }
-  const tail = src.slice(last);
+  let tail = src.slice(last);
+  if (sawThink) tail = trimLeadingBlank(tail); // remove blank lines right after </think>
   out += escapeHtml(tail);
   return out;
 }
 
-// Функция для обработки потокового текста с незавершенными тегами
 function processStreamingThink(rawText) {
   const showThink = elThink && elThink.checked;
-  const src = String(rawText || '');
-  
+  let src = normalizeStart(String(rawText || ''));
   const openPos = src.lastIndexOf('<think>');
   const closePos = src.lastIndexOf('</think>');
-  
   if (openPos !== -1 && (closePos === -1 || closePos < openPos)) {
-    // У нас есть незавершенный тег <think>
     const beforeThink = src.substring(0, openPos);
     const insideThink = src.substring(openPos + 7);
-    
     if (!showThink) {
-      // Не показываем теги think, отображаем только безопасный текст до тега
       return escapeHtml(beforeThink);
     } else {
-      // Считаем количество завершенных спойлеров для правильного индекса
       const completedThinks = (beforeThink.match(/<\/think>/gi) || []).length;
-      // Показываем интерактивный спойлер с тем что есть пока (открыт по умолчанию)
       return processThinkTags(beforeThink) + wrapThinkSpoiler(insideThink, true, completedThinks);
     }
   } else {
-    // Все теги завершены, обрабатываем как обычно
     return processThinkTags(src);
   }
 }
 
-// Глобальная переменная для отслеживания состояния спойлеров
 let openedSpoilers = new Set();
-
-// Функция для сохранения состояния открытых спойлеров
 function saveOpenSpoilers(element) {
   const spoilers = element.querySelectorAll('details.think-spoiler');
   spoilers.forEach(spoiler => {
-    if (spoiler.open && spoiler.id) {
-      openedSpoilers.add(spoiler.id);
-    } else if (!spoiler.open && spoiler.id) {
-      openedSpoilers.delete(spoiler.id);
-    }
+    if (spoiler.open && spoiler.id) openedSpoilers.add(spoiler.id);
+    else if (!spoiler.open && spoiler.id) openedSpoilers.delete(spoiler.id);
   });
 }
-
-// Функция для восстановления состояния открытых спойлеров
 function restoreOpenSpoilers(element) {
   const spoilers = element.querySelectorAll('details.think-spoiler');
   spoilers.forEach(spoiler => {
-    if (spoiler.id && openedSpoilers.has(spoiler.id)) {
-      spoiler.open = true;
-    }
+    if (spoiler.id && openedSpoilers.has(spoiler.id)) spoiler.open = true;
   });
 }
 
-// Упрощенная функция для обновления сообщения с сохранением состояния спойлеров
 function updateMessageWithSpoilerState(element, rawText) {
-  // Сохраняем состояние спойлеров
   saveOpenSpoilers(element);
-  
-  // Обновляем содержимое (безопасный рендер)
-  const processedText = processStreamingThink(rawText);
+  const processedText = processStreamingThink(normalizeStart(rawText));
   element.innerHTML = processedText.replace(/\n/g, '<br>');
-  
-  // Восстанавливаем состояние открытых спойлеров
   restoreOpenSpoilers(element);
-  
-  // Добавляем обработчики для отслеживания изменений состояния
   const spoilers = element.querySelectorAll('details.think-spoiler');
   spoilers.forEach(spoiler => {
     spoiler.addEventListener('toggle', () => {
-      if (spoiler.id) {
-        if (spoiler.open) {
-          openedSpoilers.add(spoiler.id);
-        } else {
-          openedSpoilers.delete(spoiler.id);
-        }
-      }
+      if (!spoiler.id) return;
+      if (spoiler.open) openedSpoilers.add(spoiler.id);
+      else openedSpoilers.delete(spoiler.id);
     });
   });
 }
@@ -255,19 +232,15 @@ function budgetStr(){
 elThink.addEventListener('change', ()=>{
   const mode = elThink.checked ? 'show' : 'hide';
   localStorage.setItem('think_mode', mode);
-  
-  // Перерендерим все сообщения ассистента с сохранением состояния открытых спойлеров
   const assistantMsgs = document.querySelectorAll('.msg.a');
   assistantMsgs.forEach(msgEl => {
-    // Сохраняем ID открытых спойлеров до перерисовки
     const openIds = Array.from(msgEl.querySelectorAll('details.think-spoiler'))
       .filter(d => d.open && d.id)
       .map(d => d.id);
     const originalHtml = msgEl.getAttribute('data-original');
     if (originalHtml) {
-      const processedText = processThinkTags(originalHtml.replace(/<br>/g, '\n'));
+      const processedText = processThinkTags(normalizeStart(originalHtml.replace(/<br>/g, '\n')));
       msgEl.innerHTML = processedText.replace(/\n/g, '<br>');
-      // Восстанавливаем только ранее открытые спойлеры
       openIds.forEach(id => {
         const d = msgEl.querySelector(`#${CSS.escape(id)}`);
         if (d) d.open = true;
@@ -305,28 +278,21 @@ async function sendWS(){
       accRaw += msg.text;
       
       if(!firstAssistShown){ 
-        // Создаем первое сообщение
         const div = document.createElement('div');
         div.className = 'msg a';
-        div.setAttribute('data-original', accRaw.replace(/\n/g,'<br>'));
-        
+        div.setAttribute('data-original', normalizeStart(accRaw).replace(/\n/g,'<br>'));
         updateMessageWithSpoilerState(div, accRaw);
-        
         elMsgs.appendChild(div);
         layout();
         keepScrolled();
         firstAssistShown=true; 
       } else { 
-        // Обновляем существующее сообщение с сохранением состояния спойлеров
         const lastMsg = elMsgs.lastChild;
-        lastMsg.setAttribute('data-original', accRaw.replace(/\n/g,'<br>'));
-        
+        lastMsg.setAttribute('data-original', normalizeStart(accRaw).replace(/\n/g,'<br>'));
         updateMessageWithSpoilerState(lastMsg, accRaw);
-        
         keepScrolled(); 
       }
     }else if(msg.type==='end'){
-      // Ничего не сворачиваем: состояние сохранится за счёт стабильных id и restoreOpenSpoilers
       const budget = budgetStr();
       elStatus.textContent = (msg.usage ? `tokens≈ ${msg.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
       ws.close();
@@ -347,7 +313,7 @@ async function sendPOST(){
     const res = await fetch(api('/responses'), { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
     const j = await res.json(); if(!res.ok) throw new Error((j && j.detail) || 'error');
     if(!threadId && j.thread_id) setThread(j.thread_id);
-    const responseText = j.output_text || '(пусто)';
+    const responseText = normalizeStart(j.output_text || '(пусто)');
     addMsg('assistant', responseText);
     const budget = budgetStr();
     elStatus.textContent = (j.usage ? `tokens≈ ${j.usage.total_tokens}` : '') + ` | model=${(CFG.MODEL_CONTROLLER||'')}${budget}`;
@@ -364,24 +330,17 @@ function layout(){
   const comp = document.querySelector('.composer');
   const headerH = header ? header.getBoundingClientRect().height : 0;
   const compH = comp ? comp.getBoundingClientRect().height : 0;
-  const wrapPaddingV = 40; // .wrap padding 20 top + 20 bottom
+  const wrapPaddingV = 40;
   const h = Math.max(160, window.innerHeight - headerH - compH - wrapPaddingV);
   elMsgs.style.height = h + 'px';
   elMsgs.style.paddingBottom = '0px';
 }
 
-// Инициализация состояния чекбокса из localStorage
 document.addEventListener('DOMContentLoaded', ()=>{ 
   layout(); 
   keepScrolled(); 
-  
-  // Восстанавливаем состояние чекбокса
   const saved = localStorage.getItem('think_mode');
-  if(saved){ 
-    elThink.checked = (saved === 'show'); 
-  } else { 
-    elThink.checked = false; // По умолчанию скрыто
-  }
+  elThink.checked = (saved === 'show');
   loadConfig();
   pollHealth();
   setInterval(pollHealth, 5000);

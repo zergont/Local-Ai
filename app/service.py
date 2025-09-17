@@ -96,10 +96,10 @@ class LocalResponsesService:
         try:
             summary, _usage = await self._llm.chat(messages)
             dt_ms = int((time.perf_counter() - t0) * 1000)
-            sys.stdout.write(json.dumps({"phase": "summary", "model": self._s.llm_model, "stream": False, "thread_id": thread_id, "latency": dt_ms}, ensure_ascii=False) + "\n"); sys.stdout.flush()
+            log_info("summary", model=self._s.llm_model, stream=False, thread_id=thread_id, latency=dt_ms)
         except Exception as e:  # noqa: BLE001
             dt_ms = int((time.perf_counter() - t0) * 1000)
-            sys.stdout.write(json.dumps({"phase": "summary", "model": self._s.llm_model, "stream": False, "thread_id": thread_id, "latency": dt_ms, "error": str(e)[:120]}, ensure_ascii=False) + "\n"); sys.stdout.flush()
+            log_error("summary_error", model=self._s.llm_model, stream=False, thread_id=thread_id, latency=dt_ms, error=str(e)[:200])
             log_error("fold_history_error", thread_id=thread_id, error=str(e))
             return
         await self._db.upsert_summary(thread_id, summary)
@@ -128,8 +128,7 @@ class LocalResponsesService:
         return chat
 
     def _log_final(self, thread_id: str, response_id: str, latency_ms: int) -> None:
-        line = {"phase": "final", "model": self._s.llm_model, "stream": True, "thread_id": thread_id, "response_id": response_id, "latency": latency_ms}
-        sys.stdout.write(json.dumps(line, ensure_ascii=False) + "\n"); sys.stdout.flush()
+        log_info("final", model=self._s.llm_model, stream=True, thread_id=thread_id, response_id=response_id, latency=latency_ms)
 
     async def _run_stream_collect(self, messages: List[Dict[str, Any]]) -> tuple[str, Dict[str, int]]:
         parts: List[str] = []

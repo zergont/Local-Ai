@@ -23,6 +23,7 @@ import time
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import ORJSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .db import Database
@@ -46,6 +47,11 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Local Responses API", default_response_class=ORJSONResponse2)
 
+    # Static files (for favicon and future assets)
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     app.include_router(ui_router)
     app.include_router(ws_router)
 
@@ -56,6 +62,14 @@ def create_app() -> FastAPI:
     # expose service to ws router via app.state
     app.state.service = service
     app.state.llm_online = False
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        path = static_dir / "favicon.ico"
+        if not path.is_file():
+            # Fallback: 404 if icon missing
+            raise HTTPException(status_code=404, detail="favicon not found")
+        return FileResponse(str(path))
 
     @app.on_event("startup")
     async def _startup() -> None:
